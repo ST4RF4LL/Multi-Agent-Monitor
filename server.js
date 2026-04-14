@@ -14,13 +14,22 @@ app.use(express.static(path.join(__dirname, 'public')));
 let CONFIG = {
   projectRoot: '',
   auditPrompt: '',
-  portStart: 4100,
+  portStart: 4100, // Global Server Port
   backendPort: parseInt(process.env.PORT) || 8888,
   maxConcurrent: 3,
 };
 
-// Instance = { name, dir, port, process, pid, status, sessionId, error, startedAt }
-// status: 'stopped' | 'starting' | 'ready' | 'auditing' | 'completed' | 'error'
+let globalServer = {
+  process: null,
+  pid: null,
+  port: 4100,
+  status: 'stopped', // 'stopped', 'starting', 'ready', 'error'
+  error: null,
+  lastErrorLog: null,
+};
+
+// Virtual Instances => Maps to a Session on globalServer
+// Instance = { name, dir, status, sessionId, error, startedAt }
 const instances = new Map();
 const sseClients = new Set();
 
@@ -71,8 +80,8 @@ function getInstanceSummary(inst) {
   return {
     name: inst.name,
     dir: inst.dir,
-    port: inst.port,
-    pid: inst.pid || null,
+    port: globalServer.port, // All use the single global server port
+    pid: globalServer.pid || null,
     status: inst.status,
     sessionId: inst.sessionId || null,
     error: inst.error || null,
@@ -80,23 +89,109 @@ function getInstanceSummary(inst) {
   };
 }
 
-async function waitForHealth(port, retries = 40, interval = 1500) {
-  for (let i = 0; i < retries; i++) {
-    try {
-      const res = await ocFetch(port, '/global/health');
-      if (res.status === 200 && res.data && res.data.healthy) return true;
-    } catch {}
-    await new Promise((r) => setTimeout(r, interval));
+// ─── Global Server Manager ───────────────────────────────────────────────────
+
+async function startGlobalServer() {
+  if (globalServer.status === 'ready') return { ok: true };
+  if (globalServer.status === 'starting') {
+    let retries = 0;
+    while (globalServer.status === 'starting' && retries < 40) {
+      await new Promise(r => setTimeout(r, 1000));
+      retries++;
+    }
+    if (globalServer.status === 'ready') return { ok: true };
+    return { error: 'Global server failed to start' };
   }
-  return false;
+
+  console.log(`[SYSTEM] Starting Global OpenCode Server at ${CONFIG.projectRoot} (Port: ${CONFIG.portStart})`);
+  globalServer.status = 'starting';
+  globalServer.port = CONFIG.portStart;
+  globalServer.error = null;
+
+  const env = {
+    ...process.env,
+    OPENCODE_PERMISSION: '"allow"',
+    PORT: String(globalServer.port + 1000), // Internal collision prevention
+  };
+
+  const proc = spawn('opencode', ['serve', '--port', String(globalServer.port), '--hostname', '127.0.0.1'], {
+    cwd: CONFIG.projectRoot, // Important: Global server anchors at the root
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    shell: true,
+    windowsHide: true,
+  });
+
+  globalServer.process = proc;
+  globalServer.pid = proc.pid;
+
+  proc.stdout.on('data', (data) => {
+    const line = data.toString().trim();
+    if (line) {
+      console.log(`[OPNCD OUT]`, line);
+    }
+  });
+
+  proc.stderr.on('data', (data) => {
+    const line = data.toString().trim();
+    if (line) {
+      console.error(`[OPNCD ERR]`, line);
+      globalServer.lastErrorLog = line;
+    }
+  });
+
+  proc.on('exit', (code) => {
+    console.log(`[SYSTEM] Global OpenCode Server Exited (${code})`);
+    globalServer.status = 'error';
+    globalServer.error = `Global server exited (${code}). ${globalServer.lastErrorLog ? globalServer.lastErrorLog.substring(0, 50) : ''}`;
+    globalServer.process = null;
+    globalServer.pid = null;
+
+    // Cascade failure to instances
+    for (const [name, inst] of instances) {
+      if (inst.status !== 'stopped' && inst.status !== 'completed') {
+        inst.status = 'error';
+        inst.error = 'Global server crashed or was stopped';
+        broadcast('instance.update', getInstanceSummary(inst));
+      }
+    }
+  });
+
+  // Wait for health
+  for (let i = 0; i < 40; i++) {
+    try {
+      const res = await ocFetch(globalServer.port, '/global/health');
+      if (res.status === 200 && res.data && res.data.healthy) {
+        globalServer.status = 'ready';
+        console.log(`[SYSTEM] Global OpenCode Server Ready!`);
+        return { ok: true };
+      }
+    } catch {}
+    await new Promise((r) => setTimeout(r, 1500));
+  }
+
+  globalServer.status = 'error';
+  globalServer.error = 'Health check timed out';
+  return { error: 'Global server health check timeout' };
 }
 
-// ─── Process Manager ─────────────────────────────────────────────────────────
+function stopGlobalServer() {
+  if (globalServer.pid) {
+    try {
+      treeKill(globalServer.pid, 'SIGTERM');
+    } catch {}
+  }
+  globalServer.process = null;
+  globalServer.pid = null;
+  globalServer.status = 'stopped';
+}
 
-function startInstance(name) {
+// ─── Virtual Process Manager ─────────────────────────────────────────────────
+
+async function startInstance(name) {
   const inst = instances.get(name);
   if (!inst) return { error: `Instance ${name} not found` };
-  if (inst.status !== 'stopped' && inst.status !== 'error') {
+  if (inst.status !== 'stopped' && inst.status !== 'error' && inst.status !== 'completed') {
     return { error: `Instance ${name} is already ${inst.status}` };
   }
 
@@ -104,85 +199,52 @@ function startInstance(name) {
   inst.error = null;
   broadcast('instance.update', getInstanceSummary(inst));
 
-  const env = {
-    ...process.env,
-    OPENCODE_PERMISSION: '"allow"',
-    // Give each instance a unique base PORT environment variable (offset by 1000)
-    // This prevents internal dev servers or dashboards from colliding on default port 3000
-    PORT: String(inst.port + 1000),
-  };
+  const res = await startGlobalServer();
+  if (res.error) {
+    inst.status = 'error';
+    inst.error = res.error;
+    broadcast('instance.update', getInstanceSummary(inst));
+    return { error: res.error };
+  }
 
-  const proc = spawn('opencode', ['serve', '--port', String(inst.port), '--hostname', '127.0.0.1'], {
-    cwd: inst.dir,
-    env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    shell: true,
-    windowsHide: true,
-  });
+  try {
+    const sessionRes = await ocFetch(globalServer.port, '/session', {
+      method: 'POST',
+      body: { title: `Audit: ${name}` },
+    });
 
-  inst.process = proc;
-  inst.pid = proc.pid;
-  inst.startedAt = new Date().toISOString();
-
-  proc.stdout.on('data', (data) => {
-    const line = data.toString().trim();
-    if (line) {
-      console.log(`[${name} OUT]`, line);
-      broadcast('instance.log', { name, type: 'stdout', line });
+    if (!sessionRes.data || !sessionRes.data.id) {
+      throw new Error('Failed to create session on global server');
     }
-  });
 
-  proc.stderr.on('data', (data) => {
-    const line = data.toString().trim();
-    if (line) {
-      console.error(`[${name} ERR]`, line);
-      inst.lastErrorLog = line;
-      broadcast('instance.log', { name, type: 'stderr', line });
-    }
-  });
-
-  proc.on('exit', (code) => {
-    if (inst.status !== 'stopped') {
-      inst.status = 'error';
-      inst.error = `Process exited (${code}). ${inst.lastErrorLog ? inst.lastErrorLog.substring(0, 50) : ''}`;
-      broadcast('instance.update', getInstanceSummary(inst));
-    }
-    inst.process = null;
-    inst.pid = null;
-  });
-
-  // Wait for health in background
-  waitForHealth(inst.port).then((healthy) => {
-    if (healthy && inst.status === 'starting') {
-      inst.status = 'ready';
-      broadcast('instance.update', getInstanceSummary(inst));
-    } else if (inst.status === 'starting') {
-      inst.status = 'error';
-      inst.error = 'Health check timed out';
-      broadcast('instance.update', getInstanceSummary(inst));
-    }
-  });
-
-  return { ok: true };
+    inst.sessionId = sessionRes.data.id;
+    inst.status = 'ready';
+    inst.startedAt = new Date().toISOString();
+    broadcast('instance.update', getInstanceSummary(inst));
+    return { ok: true };
+  } catch (err) {
+    inst.status = 'error';
+    inst.error = `Session creation failed: ${err.message}`;
+    broadcast('instance.update', getInstanceSummary(inst));
+    return { error: err.message };
+  }
 }
 
-function stopInstance(name) {
+async function stopInstance(name) {
   const inst = instances.get(name);
   if (!inst) return { error: `Instance ${name} not found` };
   if (inst.status === 'stopped') return { ok: true };
 
   inst.status = 'stopped';
-  inst.sessionId = null;
   inst.error = null;
 
-  if (inst.pid) {
+  if (inst.sessionId && globalServer.status === 'ready') {
     try {
-      treeKill(inst.pid, 'SIGTERM');
+      await ocFetch(globalServer.port, `/session/${inst.sessionId}/abort`, { method: 'POST' });
     } catch {}
   }
-  inst.process = null;
-  inst.pid = null;
-
+  
+  inst.sessionId = null;
   broadcast('instance.update', getInstanceSummary(inst));
   return { ok: true };
 }
@@ -197,30 +259,17 @@ async function runAuditForInstance(name) {
     inst.status = 'auditing';
     broadcast('instance.update', getInstanceSummary(inst));
 
-    // Create session
-    const sessionRes = await ocFetch(inst.port, '/session', {
-      method: 'POST',
-      body: { title: `Audit: ${name}` },
-    });
+    // The agent runs in the projectRoot, so we give it the exact relative/absolute path to focus on.
+    const contextualPrompt = `⚠️ 重要指令：请只在以下子目录路径中执行此任务，不要分析外部的兄弟目录文件。\n目标工作目录: [${inst.dir}]\n\n---任务要求---\n${CONFIG.auditPrompt}`;
 
-    if (!sessionRes.data || !sessionRes.data.id) {
-      throw new Error('Failed to create session');
-    }
-
-    const sessionId = sessionRes.data.id;
-    inst.sessionId = sessionId;
-    broadcast('instance.update', getInstanceSummary(inst));
-
-    // Send audit prompt asynchronously
-    await ocFetch(inst.port, `/session/${sessionId}/prompt_async`, {
+    await ocFetch(globalServer.port, `/session/${inst.sessionId}/prompt_async`, {
       method: 'POST',
       body: {
-        parts: [{ type: 'text', text: CONFIG.auditPrompt }],
+        parts: [{ type: 'text', text: contextualPrompt }],
       },
     });
 
-    // Poll for completion
-    pollAuditCompletion(name, sessionId);
+    pollAuditCompletion(name, inst.sessionId);
   } catch (err) {
     inst.status = 'error';
     inst.error = err.message;
@@ -238,11 +287,15 @@ function pollAuditCompletion(name, sessionId) {
       clearInterval(interval);
       return;
     }
+    // Global server might be down
+    if (globalServer.status !== 'ready') {
+      clearInterval(interval);
+      return;
+    }
     try {
-      const statusRes = await ocFetch(inst.port, '/session/status');
+      const statusRes = await ocFetch(globalServer.port, '/session/status');
       if (statusRes.data && statusRes.data[sessionId]) {
         const sessionStatus = statusRes.data[sessionId];
-        // If not busy anymore, audit is done
         if (sessionStatus === 'idle' || sessionStatus === 'done') {
           inst.status = 'completed';
           broadcast('instance.update', getInstanceSummary(inst));
@@ -253,7 +306,6 @@ function pollAuditCompletion(name, sessionId) {
     } catch {}
   }, 3000);
 
-  // Timeout after 30 minutes
   setTimeout(() => {
     clearInterval(interval);
     if (inst.status === 'auditing') {
@@ -303,6 +355,12 @@ app.get('/api/events', (req, res) => {
 // Config
 app.post('/api/config', (req, res) => {
   const { projectRoot, auditPrompt, maxConcurrent, portStart } = req.body;
+  
+  if (projectRoot && projectRoot !== CONFIG.projectRoot) {
+    // Root changed, stop global server
+    stopGlobalServer();
+  }
+  
   if (projectRoot) CONFIG.projectRoot = projectRoot;
   if (auditPrompt) CONFIG.auditPrompt = auditPrompt;
   if (maxConcurrent) CONFIG.maxConcurrent = Number(maxConcurrent);
@@ -320,25 +378,25 @@ app.post('/api/scan', (req, res) => {
   if (!root || !fs.existsSync(root)) {
     return res.status(400).json({ error: 'Invalid project root' });
   }
+
+  if (root !== CONFIG.projectRoot) {
+    stopGlobalServer();
+  }
   CONFIG.projectRoot = root;
 
   const dirs = fs.readdirSync(root, { withFileTypes: true })
     .filter((d) => d.isDirectory() && !d.name.startsWith('.'))
     .map((d) => d.name);
 
-  // Reset instances
   for (const [name, inst] of instances) {
     stopInstance(name);
   }
   instances.clear();
 
-  dirs.forEach((name, idx) => {
+  dirs.forEach((name) => {
     instances.set(name, {
       name,
       dir: path.join(root, name),
-      port: CONFIG.portStart + idx,
-      process: null,
-      pid: null,
       status: 'stopped',
       sessionId: null,
       error: null,
@@ -367,42 +425,41 @@ app.get('/api/instances/:name', (req, res) => {
 });
 
 // Start all instances
-app.post('/api/instances/start-all', (req, res) => {
+app.post('/api/instances/start-all', async (req, res) => {
   const results = {};
   for (const [name] of instances) {
-    results[name] = startInstance(name);
+    results[name] = await startInstance(name);
   }
   res.json(results);
 });
 
 // Stop all instances
-app.post('/api/instances/stop-all', (req, res) => {
+app.post('/api/instances/stop-all', async (req, res) => {
   const results = {};
   for (const [name] of instances) {
-    results[name] = stopInstance(name);
+    results[name] = await stopInstance(name);
   }
   res.json(results);
 });
 
 // Start single instance
-app.post('/api/instances/:name/start', (req, res) => {
-  res.json(startInstance(req.params.name));
+app.post('/api/instances/:name/start', async (req, res) => {
+  res.json(await startInstance(req.params.name));
 });
 
 // Stop single instance
-app.post('/api/instances/:name/stop', (req, res) => {
-  res.json(stopInstance(req.params.name));
+app.post('/api/instances/:name/stop', async (req, res) => {
+  res.json(await stopInstance(req.params.name));
 });
 
 // ─── Audit Routes ────────────────────────────────────────────────────────────
 
 // Start batch audit
-app.post('/api/audit/start', (req, res) => {
+app.post('/api/audit/start', async (req, res) => {
   if (!CONFIG.auditPrompt) {
     return res.status(400).json({ error: 'Audit prompt not set' });
   }
 
-  // Collect all ready or stopped instances
   auditQueue = [];
   activeAudits = 0;
   const needStart = [];
@@ -415,13 +472,14 @@ app.post('/api/audit/start', (req, res) => {
     }
   }
 
-  // Start stopped instances, they'll be queued when ready
+  // Pre-start the global server so we don't start it multiple times simultaneously in poor locking
+  await startGlobalServer();
+
   for (const name of needStart) {
-    startInstance(name);
+    await startInstance(name);
     auditQueue.push(name);
   }
 
-  // Process queue
   processAuditQueue();
 
   res.json({
@@ -453,7 +511,7 @@ app.post('/api/audit/:name/abort', async (req, res) => {
   if (!inst.sessionId) return res.status(400).json({ error: 'No active session' });
 
   try {
-    await ocFetch(inst.port, `/session/${inst.sessionId}/abort`, { method: 'POST' });
+    await ocFetch(globalServer.port, `/session/${inst.sessionId}/abort`, { method: 'POST' });
     inst.status = 'ready';
     broadcast('instance.update', getInstanceSummary(inst));
     res.json({ ok: true });
@@ -464,36 +522,30 @@ app.post('/api/audit/:name/abort', async (req, res) => {
 
 // ─── Proxy Routes (interact with specific opencode instance) ────────────────
 
-// Get sessions for instance
 app.get('/api/instances/:name/sessions', async (req, res) => {
-  const inst = instances.get(req.params.name);
-  if (!inst) return res.status(404).json({ error: 'Not found' });
+  if (globalServer.status !== 'ready') return res.status(502).json({ error: 'Global server offline' });
   try {
-    const r = await ocFetch(inst.port, '/session');
+    const r = await ocFetch(globalServer.port, '/session');
     res.json(r.data);
   } catch (err) {
     res.status(502).json({ error: err.message });
   }
 });
 
-// Get messages for session
 app.get('/api/instances/:name/messages/:sessionId', async (req, res) => {
-  const inst = instances.get(req.params.name);
-  if (!inst) return res.status(404).json({ error: 'Not found' });
+  if (globalServer.status !== 'ready') return res.status(502).json({ error: 'Global server offline' });
   try {
-    const r = await ocFetch(inst.port, `/session/${req.params.sessionId}/message`);
+    const r = await ocFetch(globalServer.port, `/session/${req.params.sessionId}/message`);
     res.json(r.data);
   } catch (err) {
     res.status(502).json({ error: err.message });
   }
 });
 
-// Send message to instance session
 app.post('/api/instances/:name/message/:sessionId', async (req, res) => {
-  const inst = instances.get(req.params.name);
-  if (!inst) return res.status(404).json({ error: 'Not found' });
+  if (globalServer.status !== 'ready') return res.status(502).json({ error: 'Global server offline' });
   try {
-    const r = await ocFetch(inst.port, `/session/${req.params.sessionId}/message`, {
+    const r = await ocFetch(globalServer.port, `/session/${req.params.sessionId}/message`, {
       method: 'POST',
       body: req.body,
     });
@@ -503,12 +555,10 @@ app.post('/api/instances/:name/message/:sessionId', async (req, res) => {
   }
 });
 
-// Send async prompt to instance session
 app.post('/api/instances/:name/prompt/:sessionId', async (req, res) => {
-  const inst = instances.get(req.params.name);
-  if (!inst) return res.status(404).json({ error: 'Not found' });
+  if (globalServer.status !== 'ready') return res.status(502).json({ error: 'Global server offline' });
   try {
-    await ocFetch(inst.port, `/session/${req.params.sessionId}/prompt_async`, {
+    await ocFetch(globalServer.port, `/session/${req.params.sessionId}/prompt_async`, {
       method: 'POST',
       body: req.body,
     });
@@ -518,36 +568,33 @@ app.post('/api/instances/:name/prompt/:sessionId', async (req, res) => {
   }
 });
 
-// Get session status for instance
 app.get('/api/instances/:name/session-status', async (req, res) => {
-  const inst = instances.get(req.params.name);
-  if (!inst) return res.status(404).json({ error: 'Not found' });
+  if (globalServer.status !== 'ready') return res.status(502).json({ error: 'Global server offline' });
   try {
-    const r = await ocFetch(inst.port, '/session/status');
+    const r = await ocFetch(globalServer.port, '/session/status');
     res.json(r.data);
   } catch (err) {
     res.status(502).json({ error: err.message });
   }
 });
 
-// Abort session
 app.post('/api/instances/:name/abort/:sessionId', async (req, res) => {
-  const inst = instances.get(req.params.name);
-  if (!inst) return res.status(404).json({ error: 'Not found' });
+  if (globalServer.status !== 'ready') return res.status(502).json({ error: 'Global server offline' });
   try {
-    const r = await ocFetch(inst.port, `/session/${req.params.sessionId}/abort`, { method: 'POST' });
+    const r = await ocFetch(globalServer.port, `/session/${req.params.sessionId}/abort`, { method: 'POST' });
     res.json(r.data);
   } catch (err) {
     res.status(502).json({ error: err.message });
   }
 });
 
-// Create session
 app.post('/api/instances/:name/session', async (req, res) => {
   const inst = instances.get(req.params.name);
   if (!inst) return res.status(404).json({ error: 'Not found' });
+  if (globalServer.status !== 'ready') return res.status(502).json({ error: 'Global server offline' });
+  
   try {
-    const r = await ocFetch(inst.port, '/session', {
+    const r = await ocFetch(globalServer.port, '/session', {
       method: 'POST',
       body: req.body || {},
     });
@@ -562,32 +609,42 @@ app.post('/api/instances/:name/session', async (req, res) => {
 // ─── Periodic health check ──────────────────────────────────────────────────
 
 setInterval(async () => {
-  for (const [name, inst] of instances) {
-    if (inst.status === 'stopped' || inst.status === 'starting') continue;
+  // Only check global server
+  if (globalServer.status === 'ready' || globalServer.status === 'starting') {
     try {
-      const res = await ocFetch(inst.port, '/global/health');
+      const res = await ocFetch(globalServer.port, '/global/health');
       if (res.status !== 200 || !res.data?.healthy) {
-        if (inst.status !== 'error') {
-          inst.status = 'error';
-          inst.error = 'Health check failed';
-          broadcast('instance.update', getInstanceSummary(inst));
+        if (globalServer.status === 'ready') {
+          console.error('[SYSTEM] Global Server Health Check Failed');
+          globalServer.status = 'error';
+          // Mark all instances
+          for (const [name, inst] of instances) {
+            if (inst.status !== 'stopped' && inst.status !== 'completed') {
+              inst.status = 'error';
+              inst.error = 'Global server health check failed';
+              broadcast('instance.update', getInstanceSummary(inst));
+            }
+          }
         }
       }
     } catch {
-      if (inst.status !== 'error' && inst.status !== 'stopped') {
-        inst.status = 'error';
-        inst.error = 'Unreachable';
-        broadcast('instance.update', getInstanceSummary(inst));
-      }
+       if (globalServer.status === 'ready') {
+          globalServer.status = 'error';
+          for (const [name, inst] of instances) {
+            if (inst.status !== 'stopped' && inst.status !== 'completed') {
+              inst.status = 'error';
+              inst.error = 'Global server unreachable';
+              broadcast('instance.update', getInstanceSummary(inst));
+            }
+          }
+       }
     }
   }
 
-  // Also check for instances waiting in queue that are now ready
+  // Check queue
   for (const name of [...auditQueue]) {
     const inst = instances.get(name);
-    if (inst && inst.status === 'ready') {
-      // Will be picked up by processAuditQueue
-    }
+    // if virtual instance is ready, it waits...
   }
   if (auditQueue.length > 0) {
     processAuditQueue();
@@ -597,17 +654,13 @@ setInterval(async () => {
 // ─── Graceful shutdown ──────────────────────────────────────────────────────
 
 process.on('SIGINT', () => {
-  console.log('\nShutting down all instances...');
-  for (const [name] of instances) {
-    stopInstance(name);
-  }
+  console.log('\nShutting down Global Server...');
+  stopGlobalServer();
   process.exit(0);
 });
 
 process.on('SIGTERM', () => {
-  for (const [name] of instances) {
-    stopInstance(name);
-  }
+  stopGlobalServer();
   process.exit(0);
 });
 
@@ -616,7 +669,7 @@ process.on('SIGTERM', () => {
 const PORT = CONFIG.backendPort;
 app.listen(PORT, () => {
   console.log(`\n  ╔══════════════════════════════════════════════════╗`);
-  console.log(`  ║   Multi-Agent Monitor                            ║`);
+  console.log(`  ║   Multi-Agent Monitor (Single Server Mode)       ║`);
   console.log(`  ║   http://localhost:${PORT}                          ║`);
   console.log(`  ╚══════════════════════════════════════════════════╝\n`);
 });
