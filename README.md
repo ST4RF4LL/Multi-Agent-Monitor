@@ -28,7 +28,8 @@ A web-based monitor and orchestrator for running multiple OpenCode instances in 
     ```bash
     npm start
     ```
-2.  Open your browser and navigate to `http://localhost:3000`.
+    *(Optional: You can specify a custom port by setting the PORT environment variable, e.g., `set PORT=3030 && npm start`)*
+2.  Open your browser and navigate to `http://localhost:8888`.
 3.  In the Setup screen, provide:
     *   **Project Root:** The directory containing your microservice subdirectories.
     *   **Audit Prompt:** The initial prompt to send to each instance.

@@ -15,7 +15,7 @@ let CONFIG = {
   projectRoot: '',
   auditPrompt: '',
   portStart: 4100,
-  backendPort: 3000,
+  backendPort: parseInt(process.env.PORT) || 8888,
   maxConcurrent: 3,
 };
 
