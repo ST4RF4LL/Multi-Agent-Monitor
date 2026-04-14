@@ -110,7 +110,6 @@ async function startGlobalServer() {
 
   const env = {
     ...process.env,
-    OPENCODE_PERMISSION: '"allow"',
     PORT: String(globalServer.port + 1000), // Internal collision prevention
   };
 
@@ -162,8 +161,19 @@ async function startGlobalServer() {
     try {
       const res = await ocFetch(globalServer.port, '/global/health');
       if (res.status === 200 && res.data && res.data.healthy) {
-        globalServer.status = 'ready';
+        
+        // Ensure permissions are globally allowed via REST API (bypasses ENV bugs)
+        try {
+          await ocFetch(globalServer.port, '/config', {
+            method: 'PATCH',
+            body: { permission: 'allow' }
+          });
+        } catch (e) {
+          console.error('[SYSTEM] Failed to apply global permissions:', e);
+        }
+
         console.log(`[SYSTEM] Global OpenCode Server Ready!`);
+        globalServer.status = 'ready';
         return { ok: true };
       }
     } catch {}
