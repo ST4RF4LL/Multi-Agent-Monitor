@@ -67,15 +67,16 @@ const App = (() => {
 
   function getSessionUrl(sessionId, port = 4100) {
     if (!sessionId || !currentProjectRoot) return '#';
+    const host = window.location.hostname || '127.0.0.1';
     try {
       // Base64Url encode the project root without padding
       const b64 = btoa(unescape(encodeURIComponent(currentProjectRoot)))
                   .replace(/=+$/, '')
                   .replace(/\+/g, '-')
                   .replace(/\//g, '_');
-      return `http://127.0.0.1:${port}/${b64}/session/${sessionId}`;
+      return `http://${host}:${port}/${b64}/session/${sessionId}`;
     } catch {
-      return `http://127.0.0.1:${port}/?session_id=${sessionId}`;
+      return `http://${host}:${port}/?session_id=${sessionId}`;
     }
   }
 

@@ -113,7 +113,7 @@ async function startGlobalServer() {
     PORT: String(globalServer.port + 1000), // Internal collision prevention
   };
 
-  const proc = spawn('opencode', ['serve', '--port', String(globalServer.port), '--hostname', '127.0.0.1'], {
+  const proc = spawn('opencode', ['serve', '--port', String(globalServer.port), '--hostname', '0.0.0.0'], {
     cwd: CONFIG.projectRoot, // Important: Global server anchors at the root
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
