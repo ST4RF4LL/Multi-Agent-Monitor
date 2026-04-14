@@ -124,6 +124,7 @@ function startInstance(name) {
   proc.stdout.on('data', (data) => {
     const line = data.toString().trim();
     if (line) {
+      console.log(`[${name} OUT]`, line);
       broadcast('instance.log', { name, type: 'stdout', line });
     }
   });
@@ -131,6 +132,8 @@ function startInstance(name) {
   proc.stderr.on('data', (data) => {
     const line = data.toString().trim();
     if (line) {
+      console.error(`[${name} ERR]`, line);
+      inst.lastErrorLog = line;
       broadcast('instance.log', { name, type: 'stderr', line });
     }
   });
@@ -138,7 +141,7 @@ function startInstance(name) {
   proc.on('exit', (code) => {
     if (inst.status !== 'stopped') {
       inst.status = 'error';
-      inst.error = `Process exited with code ${code}`;
+      inst.error = `Process exited (${code}). ${inst.lastErrorLog ? inst.lastErrorLog.substring(0, 50) : ''}`;
       broadcast('instance.update', getInstanceSummary(inst));
     }
     inst.process = null;

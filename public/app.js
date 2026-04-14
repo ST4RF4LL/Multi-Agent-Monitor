@@ -102,7 +102,12 @@ const App = (() => {
     });
 
     eventSource.addEventListener('instance.log', (e) => {
-      // Can display logs if needed
+      const data = JSON.parse(e.data);
+      if (data.type === 'stderr') {
+        console.error(`[${data.name}]`, data.line);
+      } else {
+        console.log(`[${data.name}]`, data.line);
+      }
     });
 
     eventSource.onerror = () => {
