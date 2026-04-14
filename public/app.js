@@ -12,6 +12,7 @@ const App = (() => {
   let pollTimer = null;
   let sessionPollTimer = null;
   let totalInstances = 0;
+  let currentProjectRoot = '';
 
   const API = '';
 
@@ -62,6 +63,20 @@ const App = (() => {
     // Newlines
     html = html.replace(/\n/g, '<br>');
     return html;
+  }
+
+  function getSessionUrl(sessionId, port = 4100) {
+    if (!sessionId || !currentProjectRoot) return '#';
+    try {
+      // Base64Url encode the project root without padding
+      const b64 = btoa(unescape(encodeURIComponent(currentProjectRoot)))
+                  .replace(/=+$/, '')
+                  .replace(/\+/g, '-')
+                  .replace(/\//g, '_');
+      return `http://127.0.0.1:${port}/${b64}/session/${sessionId}`;
+    } catch {
+      return `http://127.0.0.1:${port}/?session_id=${sessionId}`;
+    }
   }
 
   // ─── SSE Connection ──────────────────────────────────────────────────
@@ -159,7 +174,7 @@ const App = (() => {
       <div class="instance-info">
         <div class="instance-name">${escapeHtml(inst.name)}</div>
         <div class="instance-detail">
-          ${inst.sessionId ? `<a href="http://127.0.0.1:${inst.port}/?session_id=${inst.sessionId}" target="_blank" class="session-link" onclick="event.stopPropagation()">🔗 ID: ${inst.sessionId.substring(0,8)}</a>` : `<span>未建会话</span>`}
+          ${inst.sessionId ? `<a href="${getSessionUrl(inst.sessionId, inst.port)}" target="_blank" class="session-link" onclick="event.stopPropagation()">🔗 ID: ${inst.sessionId.substring(0,8)}</a>` : `<span>未建会话</span>`}
           ${inst.error ? `<span style="color:var(--accent-red)" title="${escapeHtml(inst.error)}">⚠</span>` : ''}
         </div>
       </div>
@@ -269,11 +284,14 @@ const App = (() => {
       completed: '✅ 审计完成',
       error: '❌ 错误',
     };
+    
     $('chat-instance-name').textContent = selectedInstance.name;
+    const stLabel = statusLabels[selectedInstance.status] || selectedInstance.status;
+    
     $('chat-instance-status').innerHTML =
-      `<span>${statusLabels[selectedInstance.status] || selectedInstance.status}</span> | ` +
-      (selectedInstance.sessionId 
-        ? `<a href="http://127.0.0.1:${selectedInstance.port}/?session_id=${selectedInstance.sessionId}" target="_blank" style="color: var(--accent-blue); text-decoration: none;">🔗 WebUI</a>` 
+      `<span>${stLabel}</span> | ` +
+      (currentSessionId 
+        ? `<a href="${getSessionUrl(currentSessionId, selectedInstance.port)}" target="_blank" style="color: var(--accent-blue); text-decoration: none;">🔗 WebUI</a>` 
         : `<span>未建会话</span>`);
   }
 
@@ -624,6 +642,7 @@ const App = (() => {
       const existing = await api('/api/instances');
       if (Array.isArray(existing) && existing.length > 0) {
         const config = await api('/api/config');
+        currentProjectRoot = config.projectRoot;
         instances = existing;
         totalInstances = instances.length;
 
