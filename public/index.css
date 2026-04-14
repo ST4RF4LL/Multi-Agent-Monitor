@@ -775,26 +775,58 @@ html, body {
 /* ─── Chat Input ────────────────────────────────────────────────────────── */
 
 .chat-input-area {
-  padding: 0.75rem 1.25rem;
-  border-top: 1px solid var(--border-subtle);
-  background: var(--bg-secondary);
-  flex-shrink: 0;
+  padding: 1rem;
+  border-top: 1px solid var(--border-color);
+  background-color: var(--surface-default);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
 }
 
 .chat-input-wrapper {
   display: flex;
-  align-items: flex-end;
   gap: 0.5rem;
-  background: var(--bg-input);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-lg);
+  align-items: flex-end;
+}
+
+.chat-input-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
+.model-select {
+  background-color: var(--surface-light);
+  color: var(--text-default);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.8rem;
+  outline: none;
+  cursor: pointer;
+  max-width: 15rem;
+}
+
+.model-select:focus {
+  border-color: var(--accent-blue);
+}
+
+.chat-input-wrapper {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
   padding: 0.5rem;
-  transition: border-color var(--transition-fast);
+  transition: border-color var(--transition-fast), box-shadow var(--transition-fast);
 }
 
 .chat-input-wrapper:focus-within {
-  border-color: var(--accent-primary);
-  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.1);
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.15);
 }
 
 .chat-input-wrapper textarea {

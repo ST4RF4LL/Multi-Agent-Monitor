@@ -81,12 +81,13 @@ function getInstanceSummary(inst) {
   return {
     name: inst.name,
     dir: inst.dir,
-    port: globalServer.port, // All use the single global server port
+    port: globalServer.port,
     pid: globalServer.pid || null,
     status: inst.status,
     sessionId: inst.sessionId || null,
     error: inst.error || null,
     startedAt: inst.startedAt || null,
+    model: inst.model || null,
   };
 }
 
@@ -275,7 +276,7 @@ async function runAuditForInstance(name) {
 
     const promptBody = {
       parts: [{ type: 'text', text: contextualPrompt }],
-      model: CONFIG.model || undefined,
+      model: inst.model || CONFIG.model || undefined,
     };
 
     await ocFetch(globalServer.port, `/session/${inst.sessionId}/prompt_async`, {
@@ -307,10 +308,10 @@ function pollAuditCompletion(name, sessionId) {
       return;
     }
     try {
-      const msgsRes = await ocFetch(globalServer.port, `/session/${sessionId}/message`);
-      if (msgsRes.data && Array.isArray(msgsRes.data) && msgsRes.data.length > 0) {
-        const lastMsg = msgsRes.data[msgsRes.data.length - 1];
-        if (lastMsg && lastMsg.info && lastMsg.info.finish) {
+      const statusRes = await ocFetch(globalServer.port, '/session/status');
+      if (statusRes.data && statusRes.data[sessionId]) {
+        const st = statusRes.data[sessionId];
+        if (st.type === 'idle') {
           inst.status = 'completed';
           broadcast('instance.update', getInstanceSummary(inst));
           clearInterval(interval);
@@ -318,7 +319,7 @@ function pollAuditCompletion(name, sessionId) {
         }
       }
     } catch {}
-  }, 3000);
+  }, 2000);
 
   setTimeout(() => {
     clearInterval(interval);
@@ -416,11 +417,68 @@ app.post('/api/scan', (req, res) => {
       sessionId: null,
       error: null,
       startedAt: null,
+      model: CONFIG.model || '',
     });
   });
 
   broadcast('instances.reset', dirs.map((n) => getInstanceSummary(instances.get(n))));
   res.json({ ok: true, services: dirs });
+});
+
+// Get available models dynamically from OpenCode global server
+app.get('/api/models', async (req, res) => {
+  const oldRoot = CONFIG.projectRoot;
+  let changed = false;
+  
+  if (!CONFIG.projectRoot) {
+    CONFIG.projectRoot = process.cwd();
+    changed = true;
+  }
+
+  const startRes = await startGlobalServer();
+  
+  if (changed) {
+    CONFIG.projectRoot = oldRoot;
+  }
+  
+  if (startRes.error) return res.status(500).json({ error: startRes.error });
+
+  try {
+    const configRes = await ocFetch(globalServer.port, '/config');
+    const providers = configRes.data?.provider || {};
+    const modelSet = new Set();
+    
+    for (const provider of Object.values(providers)) {
+      if (provider.models) {
+        Object.keys(provider.models).forEach(m => modelSet.add(m));
+      }
+    }
+    
+    res.json({ models: Array.from(modelSet) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update global model
+app.post('/api/global-model', (req, res) => {
+  const { model } = req.body;
+  CONFIG.model = model || '';
+  for (const [name, inst] of instances) {
+    inst.model = CONFIG.model;
+    broadcast('instance.update', getInstanceSummary(inst));
+  }
+  res.json({ ok: true });
+});
+
+// Update instance specific model
+app.post('/api/instances/:name/model', (req, res) => {
+  const { model } = req.body;
+  const inst = instances.get(req.params.name);
+  if (!inst) return res.status(404).json({ error: 'Not found' });
+  inst.model = model || '';
+  broadcast('instance.update', getInstanceSummary(inst));
+  res.json({ ok: true });
 });
 
 // List all instances
@@ -571,12 +629,22 @@ app.post('/api/instances/:name/message/:sessionId', async (req, res) => {
 });
 
 app.post('/api/instances/:name/prompt/:sessionId', async (req, res) => {
+  const inst = instances.get(req.params.name);
+  if (!inst) return res.status(404).json({ error: 'Not found' });
   if (globalServer.status !== 'ready') return res.status(502).json({ error: 'Global server offline' });
   try {
     await ocFetch(globalServer.port, `/session/${req.params.sessionId}/prompt_async`, {
       method: 'POST',
       body: req.body,
     });
+    
+    // Explicitly transition to auditing and start the official robust poll completion checker
+    if (inst.status !== 'auditing') {
+      inst.status = 'auditing';
+      broadcast('instance.update', getInstanceSummary(inst));
+      pollAuditCompletion(inst.name, req.params.sessionId);
+    }
+    
     res.json({ ok: true });
   } catch (err) {
     res.status(502).json({ error: err.message });

@@ -103,6 +103,9 @@
           </div>
           <div class="toolbar-stats" id="toolbar-stats"></div>
           <div class="toolbar-actions">
+            <select id="global-model-select" class="model-select" onchange="App.setGlobalModel(this.value)">
+              <option value="">-- 全局覆盖模型 --</option>
+            </select>
             <button
               class="btn btn-audit btn-sm"
               id="btn-start-audit"
@@ -221,6 +224,12 @@
                   >
                     ➤
                   </button>
+                </div>
+                <div class="chat-input-controls">
+                  <span>当前实例专属模型设置: </span>
+                  <select id="instance-model-select" class="model-select" onchange="App.setInstanceModel(this.value)">
+                    <option value="">跟随系统默认设置</option>
+                  </select>
                 </div>
               </div>
             </div>

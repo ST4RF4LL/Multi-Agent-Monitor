@@ -99,6 +99,11 @@ const App = (() => {
           selectedInstance = data;
           updateChatHeader();
           
+          const instSel = $('instance-model-select');
+          if (instSel && instSel.value !== (data.model || '')) {
+            instSel.value = data.model || '';
+          }
+          
           if (data.status === 'auditing') {
             const toggle = $('toggle-auto-refresh');
             if (toggle) toggle.checked = true;
@@ -271,6 +276,12 @@ const App = (() => {
     $('chat-empty').style.display = 'none';
     $('chat-content').style.display = 'flex';
     updateChatHeader();
+    
+    // Update instance model selector
+    const instSel = $('instance-model-select');
+    if (instSel) {
+      instSel.value = selectedInstance.model || '';
+    }
 
     // Load messages if session exists
     if (currentSessionId) {
@@ -315,14 +326,6 @@ const App = (() => {
       const data = await api(`/api/instances/${selectedInstance.name}/messages/${currentSessionId}`);
       if (Array.isArray(data)) {
         messages = data;
-        
-        if (messages.length > 0) {
-          const lastMsg = messages[messages.length - 1];
-          if (lastMsg && lastMsg.info && lastMsg.info.finish) {
-            const toggle = $('toggle-auto-refresh');
-            if (toggle) toggle.checked = false;
-          }
-        }
       }
       renderMessages();
     } catch (err) {
@@ -465,7 +468,7 @@ const App = (() => {
       await api(`/api/instances/${selectedInstance.name}/prompt/${currentSessionId}`, {
         method: 'POST',
         body: {
-          model: currentModel || undefined,
+          model: selectedInstance.model || undefined,
           parts: [{ type: 'text', text }],
         },
       });
@@ -670,19 +673,32 @@ const App = (() => {
     if (input) {
       input.addEventListener('input', autoResizeInput);
     }
-    
-    // Fetch available models from OpenCode globally
+
+    // Load models
     try {
       const db = await api('/api/models');
-      if (db.models && db.models.length > 0) {
+      if (db && db.models) {
+        const modelOptions = db.models.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('');
+        
+        // 1. Setup page datalist
         const list = $('model-list');
         if (list) {
-          list.innerHTML = db.models.map(m => `<option value="${m}"></option>`).join('');
+          list.innerHTML = db.models.map(m => `<option value="${escapeHtml(m)}"></option>`).join('');
+        }
+        
+        // 2. Global model select
+        const globalSel = $('global-model-select');
+        if (globalSel) {
+          globalSel.innerHTML = `<option value="">-- 系统默认模型 --</option>` + modelOptions;
+        }
+
+        // 3. Instance model select
+        const instSel = $('instance-model-select');
+        if (instSel) {
+          instSel.innerHTML = `<option value="">跟随系统默认设置</option>` + modelOptions;
         }
       }
-    } catch (e) {
-      console.warn('Failed to fetch models:', e);
-    }
+    } catch {}
 
     // Auto-resume: if server already has instances, skip setup
     try {
@@ -712,6 +728,32 @@ const App = (() => {
     } catch {}
   });
 
+  // ─── Model Selection Logic ───────────────────────────────────────────
+
+  async function setGlobalModel(model) {
+    try {
+      await api('/api/global-model', { method: 'POST', body: { model } });
+      toast('✅ 已成功更改全局模型策略', 'success');
+      // Also update local selected instance model dropdown visually immediately if it matched previous config
+      const instSel = $('instance-model-select');
+      if (instSel && !instSel.value) {
+        // Keeps following system default visually
+      }
+    } catch (err) {
+      toast('全局模型修改失败: ' + err.message, 'error');
+    }
+  }
+
+  async function setInstanceModel(model) {
+    if (!selectedInstance) return;
+    try {
+      await api(`/api/instances/${selectedInstance.name}/model`, { method: 'POST', body: { model } });
+      toast(`✅ 已为 ${selectedInstance.name} 分配独立模型`, 'success');
+    } catch (err) {
+      toast('实例模型修改失败: ' + err.message, 'error');
+    }
+  }
+
   // ─── Public API ──────────────────────────────────────────────────────
 
   return {
@@ -725,5 +767,7 @@ const App = (() => {
     refreshMessages,
     abortCurrentSession,
     selectInstance,
+    setGlobalModel,
+    setInstanceModel,
   };
 })();
