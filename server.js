@@ -185,10 +185,10 @@ async function startGlobalServer() {
   return { error: 'Global server health check timeout' };
 }
 
-function stopGlobalServer() {
+async function stopGlobalServer() {
   if (globalServer.pid) {
     try {
-      treeKill(globalServer.pid, 'SIGTERM');
+      await new Promise((resolve) => treeKill(globalServer.pid, 'SIGTERM', resolve));
     } catch {}
   }
   globalServer.process = null;
@@ -663,14 +663,20 @@ setInterval(async () => {
 
 // ─── Graceful shutdown ──────────────────────────────────────────────────────
 
-process.on('SIGINT', () => {
-  console.log('\nShutting down Global Server...');
-  stopGlobalServer();
-  process.exit(0);
+process.on('SIGINT', async () => {
+  console.log('\n[SYSTEM] Shutting down global server...');
+  if (globalServer.pid) {
+    try { 
+      await new Promise((resolve) => treeKill(globalServer.pid, 'SIGKILL', resolve)); 
+    } catch (err) { 
+      console.error(err); 
+    }
+  }
+  process.exit();
 });
 
-process.on('SIGTERM', () => {
-  stopGlobalServer();
+process.on('SIGTERM', async () => {
+  await stopGlobalServer();
   process.exit(0);
 });
 
