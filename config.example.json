@@ -1,0 +1,8 @@
+{
+  "projectRoot": "D:/path/to/your/microservices",
+  "auditPrompt": "请对当前微服务项目进行全面的安全审计，包括但不限于：\n1. 代码注入漏洞（SQL注入、命令注入、XSS等）\n2. 认证与授权缺陷\n3. 敏感信息泄露\n4. 不安全的依赖项\n5. 配置安全问题\n\n请提供详细的漏洞描述、风险等级、影响范围和修复建议。",
+  "portRange": { "start": 4100, "end": 4119 },
+  "backendPort": 3000,
+  "maxConcurrent": 3,
+  "autoPermission": true
+}
