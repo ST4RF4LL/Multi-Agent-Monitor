@@ -670,6 +670,19 @@ const App = (() => {
     if (input) {
       input.addEventListener('input', autoResizeInput);
     }
+    
+    // Fetch available models from OpenCode globally
+    try {
+      const db = await api('/api/models');
+      if (db.models && db.models.length > 0) {
+        const list = $('model-list');
+        if (list) {
+          list.innerHTML = db.models.map(m => `<option value="${m}"></option>`).join('');
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to fetch models:', e);
+    }
 
     // Auto-resume: if server already has instances, skip setup
     try {
