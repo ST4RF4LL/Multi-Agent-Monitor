@@ -182,7 +182,7 @@ const App = (() => {
       <div class="instance-info">
         <div class="instance-name">${escapeHtml(inst.name)}</div>
         <div class="instance-detail">
-          ${inst.sessionId ? `<a href="${getSessionUrl(inst.sessionId, inst.port)}" target="_blank" class="session-link" onclick="event.stopPropagation()">🔗 ID: ${inst.sessionId.substring(0,8)}</a>` : `<span>未建会话</span>`}
+          ${inst.sessionId ? `<a href="${getSessionUrl(inst.sessionId, inst.port)}" target="_blank" class="session-link" onclick="event.stopPropagation()">🔗 ID: ${inst.sessionId.slice(-8)}</a>` : `<span>未建会话</span>`}
           ${inst.error ? `<span style="color:var(--accent-red)" title="${escapeHtml(inst.error)}">⚠</span>` : ''}
         </div>
       </div>
