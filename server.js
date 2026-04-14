@@ -17,6 +17,7 @@ let CONFIG = {
   portStart: 4100, // Global Server Port
   backendPort: parseInt(process.env.PORT) || 8888,
   maxConcurrent: 3,
+  model: '',
 };
 
 let globalServer = {
@@ -113,7 +114,7 @@ async function startGlobalServer() {
     PORT: String(globalServer.port + 1000), // Internal collision prevention
   };
 
-  const proc = spawn('opencode', ['serve', '--port', String(globalServer.port), '--hostname', '0.0.0.0'], {
+  const proc = spawn('opencode', ['serve', '--port', String(globalServer.port), '--hostname', '127.0.0.1'], {
     cwd: CONFIG.projectRoot, // Important: Global server anchors at the root
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -272,11 +273,14 @@ async function runAuditForInstance(name) {
     // The agent runs in the projectRoot, so we give it the exact relative/absolute path to focus on.
     const contextualPrompt = `⚠️ 重要指令：请只在以下子目录路径中执行此任务，不要分析外部的兄弟目录文件。\n目标工作目录: [${inst.dir}]\n\n---任务要求---\n${CONFIG.auditPrompt}`;
 
+    const promptBody = {
+      parts: [{ type: 'text', text: contextualPrompt }],
+      model: CONFIG.model || undefined,
+    };
+
     await ocFetch(globalServer.port, `/session/${inst.sessionId}/prompt_async`, {
       method: 'POST',
-      body: {
-        parts: [{ type: 'text', text: contextualPrompt }],
-      },
+      body: promptBody,
     });
 
     pollAuditCompletion(name, inst.sessionId);
@@ -364,7 +368,7 @@ app.get('/api/events', (req, res) => {
 
 // Config
 app.post('/api/config', (req, res) => {
-  const { projectRoot, auditPrompt, maxConcurrent, portStart } = req.body;
+  const { projectRoot, auditPrompt, maxConcurrent, portStart, model } = req.body;
   
   if (projectRoot && projectRoot !== CONFIG.projectRoot) {
     // Root changed, stop global server
@@ -375,6 +379,7 @@ app.post('/api/config', (req, res) => {
   if (auditPrompt) CONFIG.auditPrompt = auditPrompt;
   if (maxConcurrent) CONFIG.maxConcurrent = Number(maxConcurrent);
   if (portStart) CONFIG.portStart = Number(portStart);
+  if (model !== undefined) CONFIG.model = model;
   res.json({ ok: true, config: CONFIG });
 });
 

@@ -13,6 +13,7 @@ const App = (() => {
   let sessionPollTimer = null;
   let totalInstances = 0;
   let currentProjectRoot = '';
+  let currentModel = '';
 
   const API = '';
 
@@ -67,16 +68,15 @@ const App = (() => {
 
   function getSessionUrl(sessionId, port = 4100) {
     if (!sessionId || !currentProjectRoot) return '#';
-    const host = window.location.hostname || '127.0.0.1';
     try {
       // Base64Url encode the project root without padding
       const b64 = btoa(unescape(encodeURIComponent(currentProjectRoot)))
                   .replace(/=+$/, '')
                   .replace(/\+/g, '-')
                   .replace(/\//g, '_');
-      return `http://${host}:${port}/${b64}/session/${sessionId}`;
+      return `http://127.0.0.1:${port}/${b64}/session/${sessionId}`;
     } catch {
-      return `http://${host}:${port}/?session_id=${sessionId}`;
+      return `http://127.0.0.1:${port}/?session_id=${sessionId}`;
     }
   }
 
@@ -465,6 +465,7 @@ const App = (() => {
       await api(`/api/instances/${selectedInstance.name}/prompt/${currentSessionId}`, {
         method: 'POST',
         body: {
+          model: currentModel || undefined,
           parts: [{ type: 'text', text }],
         },
       });
@@ -515,6 +516,7 @@ const App = (() => {
     const auditPrompt = $('input-audit-prompt').value.trim();
     const maxConcurrent = parseInt($('input-max-concurrent').value) || 3;
     const portStart = parseInt($('input-port-start').value) || 4100;
+    const model = $('input-model').value.trim();
 
     if (!projectRoot) {
       toast('请输入项目根目录', 'error');
@@ -530,11 +532,19 @@ const App = (() => {
     btn.innerHTML = '<span class="spinner"></span> 扫描中...';
 
     try {
-      // Save config
-      await api('/api/config', {
+      // Save config globally
+      const configRes = await api('/api/config', {
         method: 'POST',
-        body: { projectRoot, auditPrompt, maxConcurrent, portStart },
+        body: { projectRoot, auditPrompt, maxConcurrent, portStart, model },
       });
+
+      if (configRes.error) {
+        toast('配置保存失败: ' + configRes.error, 'error');
+        return;
+      }
+      
+      currentProjectRoot = projectRoot;
+      currentModel = model;
 
       // Scan project directory
       const result = await api('/api/scan', {
@@ -667,6 +677,7 @@ const App = (() => {
       if (Array.isArray(existing) && existing.length > 0) {
         const config = await api('/api/config');
         currentProjectRoot = config.projectRoot;
+        currentModel = config.model || '';
         instances = existing;
         totalInstances = instances.length;
 
@@ -675,6 +686,7 @@ const App = (() => {
         if (config.auditPrompt) $('input-audit-prompt').value = config.auditPrompt;
         if (config.maxConcurrent) $('input-max-concurrent').value = config.maxConcurrent;
         if (config.portStart) $('input-port-start').value = config.portStart;
+        if (config.model) $('input-model').value = config.model;
 
         // Switch to monitor
         $('setup-screen').style.display = 'none';

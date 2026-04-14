@@ -28,16 +28,21 @@
             <textarea id="input-audit-prompt" placeholder="请对当前微服务项目进行全面的安全审计..." spellcheck="false"></textarea>
             <div class="hint">统一下发给每个 OpenCode 实例的审计指令</div>
           </div>
-          <div class="form-row">
+          <div class="form-row" style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem;">
             <div class="form-group">
               <label>⚡ 最大并发数</label>
               <input type="number" id="input-max-concurrent" value="3" min="1" max="20">
-              <div class="hint">同时运行的审计实例数量</div>
+              <div class="hint">同时运行的审计实例</div>
             </div>
             <div class="form-group">
               <label>🔌 起始端口</label>
               <input type="number" id="input-port-start" value="4100" min="1024" max="65500">
-              <div class="hint">OpenCode 实例端口起始值</div>
+              <div class="hint">API 服务端口基数</div>
+            </div>
+            <div class="form-group">
+              <label>🤖 运行模型设置</label>
+              <input type="text" id="input-model" placeholder="留空默认">
+              <div class="hint">例如: gpt-4o</div>
             </div>
           </div>
           <button class="btn btn-primary btn-lg btn-full" id="btn-launch" onclick="App.launch()">
