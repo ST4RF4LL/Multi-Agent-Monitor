@@ -106,7 +106,7 @@ function startInstance(name) {
 
   const env = {
     ...process.env,
-    OPENCODE_PERMISSION: 'allow',
+    OPENCODE_PERMISSION: '"allow"',
     // Give each instance a unique base PORT environment variable (offset by 1000)
     // This prevents internal dev servers or dashboards from colliding on default port 3000
     PORT: String(inst.port + 1000),
