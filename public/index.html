@@ -102,6 +102,11 @@
               <span class="chat-header-name" id="chat-instance-name">-</span>
               <span class="chat-header-status" id="chat-instance-status">-</span>
               <div class="chat-header-actions">
+                <label class="auto-refresh-toggle" title="自动拉取最新消息">
+                  <input type="checkbox" id="toggle-auto-refresh">
+                  <span class="slider"></span>
+                  <span class="label-text">自动刷新</span>
+                </label>
                 <button class="btn btn-ghost btn-sm" id="btn-refresh-messages" onclick="App.refreshMessages()">🔄 刷新</button>
                 <button class="btn btn-danger btn-sm" id="btn-abort" onclick="App.abortCurrentSession()">⏹ 中止</button>
               </div>

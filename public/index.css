@@ -611,6 +611,66 @@ html, body {
   margin-left: auto;
   display: flex;
   gap: 0.5rem;
+  align-items: center;
+}
+
+.auto-refresh-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  margin-right: 0.5rem;
+  position: relative;
+}
+
+.auto-refresh-toggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+
+.auto-refresh-toggle .slider {
+  width: 32px;
+  height: 18px;
+  background-color: var(--surface-light);
+  border-radius: 10px;
+  position: relative;
+  transition: background-color 0.3s;
+  box-shadow: inset 0 1px 3px rgba(0,0,0,0.3);
+}
+
+.auto-refresh-toggle .slider::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  background-color: var(--text-muted);
+  border-radius: 50%;
+  transition: transform 0.3s, background-color 0.3s;
+}
+
+.auto-refresh-toggle input:checked + .slider {
+  background-color: rgba(56, 189, 248, 0.2);
+  border: 1px solid var(--accent-blue);
+}
+
+.auto-refresh-toggle input:checked + .slider::before {
+  transform: translateX(14px);
+  background-color: var(--accent-blue);
+  box-shadow: 0 0 5px var(--accent-blue);
+}
+
+.auto-refresh-toggle .label-text {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.auto-refresh-toggle input:checked ~ .label-text {
+  color: var(--accent-blue);
 }
 
 .chat-messages {

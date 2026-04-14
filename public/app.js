@@ -94,14 +94,22 @@ const App = (() => {
       updateInstanceInList(data);
       renderStats();
       // If this is the selected instance, update chat header
-      if (selectedInstance && selectedInstance.name === data.name) {
-        selectedInstance = data;
-        updateChatHeader();
-        // Auto-refresh messages if status changed to completed
-        if (data.status === 'completed' || data.status === 'error') {
-          refreshMessages();
+        if (selectedInstance && selectedInstance.name === data.name) {
+          selectedInstance = data;
+          updateChatHeader();
+          
+          if (data.status === 'auditing') {
+            const toggle = $('toggle-auto-refresh');
+            if (toggle) toggle.checked = true;
+          }
+
+          // Auto-refresh messages if status changed to completed
+          if (data.status === 'completed' || data.status === 'error') {
+            const toggle = $('toggle-auto-refresh');
+            if (toggle) toggle.checked = false;
+            refreshMessages();
+          }
         }
-      }
     });
 
     eventSource.addEventListener('instances.reset', (e) => {
@@ -306,6 +314,14 @@ const App = (() => {
       const data = await api(`/api/instances/${selectedInstance.name}/messages/${currentSessionId}`);
       if (Array.isArray(data)) {
         messages = data;
+        
+        if (messages.length > 0) {
+          const lastMsg = messages[messages.length - 1];
+          if (lastMsg && lastMsg.info && lastMsg.info.finish) {
+            const toggle = $('toggle-auto-refresh');
+            if (toggle) toggle.checked = false;
+          }
+        }
       }
       renderMessages();
     } catch (err) {
@@ -392,6 +408,9 @@ const App = (() => {
     sessionPollTimer = setInterval(async () => {
       if (!selectedInstance) return;
       
+      const toggle = $('toggle-auto-refresh');
+      if (toggle && !toggle.checked) return;
+      
       if (currentSessionId) {
         await refreshMessages();
       } else if (selectedInstance.sessionId) {
@@ -407,6 +426,10 @@ const App = (() => {
     const input = $('chat-input');
     const text = input.value.trim();
     if (!text || !selectedInstance) return;
+
+    // Enable auto-refresh when sending a message
+    const toggle = $('toggle-auto-refresh');
+    if (toggle) toggle.checked = true;
 
     // If no session, create one first
     if (!currentSessionId) {
