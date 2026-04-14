@@ -159,7 +159,7 @@ const App = (() => {
       <div class="instance-info">
         <div class="instance-name">${escapeHtml(inst.name)}</div>
         <div class="instance-detail">
-          <span>:${inst.port}</span>
+          ${inst.sessionId ? `<a href="http://127.0.0.1:${inst.port}/?session_id=${inst.sessionId}" target="_blank" class="session-link" onclick="event.stopPropagation()">🔗 ID: ${inst.sessionId.substring(0,8)}</a>` : `<span>未建会话</span>`}
           ${inst.error ? `<span style="color:var(--accent-red)" title="${escapeHtml(inst.error)}">⚠</span>` : ''}
         </div>
       </div>
@@ -270,8 +270,11 @@ const App = (() => {
       error: '❌ 错误',
     };
     $('chat-instance-name').textContent = selectedInstance.name;
-    $('chat-instance-status').textContent =
-      `${statusLabels[selectedInstance.status] || selectedInstance.status} | :${selectedInstance.port}`;
+    $('chat-instance-status').innerHTML =
+      `<span>${statusLabels[selectedInstance.status] || selectedInstance.status}</span> | ` +
+      (selectedInstance.sessionId 
+        ? `<a href="http://127.0.0.1:${selectedInstance.port}/?session_id=${selectedInstance.sessionId}" target="_blank" style="color: var(--accent-blue); text-decoration: none;">🔗 WebUI</a>` 
+        : `<span>未建会话</span>`);
   }
 
   async function refreshMessages() {

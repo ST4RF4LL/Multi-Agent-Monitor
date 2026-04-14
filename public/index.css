@@ -494,6 +494,19 @@ html, body {
   gap: 0.5rem;
 }
 
+.session-link {
+  color: var(--accent-blue, var(--accent-primary));
+  text-decoration: none;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+  transition: all 0.2s;
+}
+
+.session-link:hover {
+  text-decoration: underline;
+  text-shadow: 0 0 5px rgba(56, 189, 248, 0.5);
+}
+
 .instance-status-badge {
   display: inline-flex;
   align-items: center;
