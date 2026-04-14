@@ -372,16 +372,15 @@ const App = (() => {
   function startSessionPoll() {
     if (sessionPollTimer) clearInterval(sessionPollTimer);
     sessionPollTimer = setInterval(async () => {
-      if (!selectedInstance || !currentSessionId) return;
-      if (selectedInstance.status === 'auditing') {
+      if (!selectedInstance) return;
+      
+      if (currentSessionId) {
         await refreshMessages();
-      }
-      // Also check if sessionId was created
-      if (!currentSessionId && selectedInstance.sessionId) {
+      } else if (selectedInstance.sessionId) {
         currentSessionId = selectedInstance.sessionId;
         await refreshMessages();
       }
-    }, 5000);
+    }, 2000); // Polling every 2 seconds for snappier chat
   }
 
   // ─── Chat Interaction ────────────────────────────────────────────────

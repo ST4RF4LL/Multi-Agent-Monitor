@@ -293,10 +293,10 @@ function pollAuditCompletion(name, sessionId) {
       return;
     }
     try {
-      const statusRes = await ocFetch(globalServer.port, '/session/status');
-      if (statusRes.data && statusRes.data[sessionId]) {
-        const sessionStatus = statusRes.data[sessionId];
-        if (sessionStatus === 'idle' || sessionStatus === 'done') {
+      const msgsRes = await ocFetch(globalServer.port, `/session/${sessionId}/message`);
+      if (msgsRes.data && Array.isArray(msgsRes.data) && msgsRes.data.length > 0) {
+        const lastMsg = msgsRes.data[msgsRes.data.length - 1];
+        if (lastMsg && lastMsg.info && lastMsg.info.finish) {
           inst.status = 'completed';
           broadcast('instance.update', getInstanceSummary(inst));
           clearInterval(interval);
