@@ -69,8 +69,10 @@ const App = (() => {
   function getSessionUrl(sessionId, port = 4100) {
     if (!sessionId || !currentProjectRoot) return '#';
     try {
+      // Normalize Windows backslashes to forward slashes (OpenCode expects '/')
+      const normalizedRoot = currentProjectRoot.replace(/\\/g, '/');
       // Base64Url encode the project root without padding
-      const b64 = btoa(unescape(encodeURIComponent(currentProjectRoot)))
+      const b64 = btoa(unescape(encodeURIComponent(normalizedRoot)))
                   .replace(/=+$/, '')
                   .replace(/\+/g, '-')
                   .replace(/\//g, '_');

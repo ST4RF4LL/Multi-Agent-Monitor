@@ -297,21 +297,42 @@ function pollAuditCompletion(name, sessionId) {
   const inst = instances.get(name);
   if (!inst) return;
 
+  // Grace period: skip the first few polls to let OpenCode register the session as "busy"
+  let gracePolls = 3;
+
   const interval = setInterval(async () => {
     if (inst.status !== 'auditing') {
       clearInterval(interval);
       return;
     }
-    // Global server might be down
     if (globalServer.status !== 'ready') {
       clearInterval(interval);
       return;
     }
+
+    // Skip initial grace period to avoid false-positive completion
+    if (gracePolls > 0) {
+      gracePolls--;
+      return;
+    }
+
     try {
+      // Step 1: Check session status map
       const statusRes = await ocFetch(globalServer.port, '/session/status');
       if (statusRes.data && statusRes.data[sessionId]) {
         const st = statusRes.data[sessionId];
-        if (st.type === 'idle') {
+        if (st.type === 'busy' || st.type === 'retry') {
+          // Still actively working, keep polling
+          return;
+        }
+      }
+
+      // Step 2: Session not in status map (or idle) — verify via messages
+      // OpenCode omits idle sessions from the status map entirely
+      const msgsRes = await ocFetch(globalServer.port, `/session/${sessionId}/message`);
+      if (msgsRes.data && Array.isArray(msgsRes.data) && msgsRes.data.length > 0) {
+        const lastMsg = msgsRes.data[msgsRes.data.length - 1];
+        if (lastMsg && lastMsg.info && lastMsg.info.role === 'assistant' && lastMsg.info.finish) {
           inst.status = 'completed';
           broadcast('instance.update', getInstanceSummary(inst));
           clearInterval(interval);
