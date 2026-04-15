@@ -297,8 +297,12 @@ function pollAuditCompletion(name, sessionId) {
   const inst = instances.get(name);
   if (!inst) return;
 
-  // Grace period: skip the first few polls to let OpenCode register the session as "busy"
-  let gracePolls = 3;
+  // Grace period: skip initial polls to let OpenCode register the session as "busy"
+  let gracePolls = 5; // 10 seconds grace
+  // Require consecutive idle detections to confirm completion
+  // (avoids false positives during brief idle gaps between agent steps)
+  let consecutiveIdle = 0;
+  const IDLE_THRESHOLD = 3; // 3 consecutive idle checks (6 seconds of sustained idle)
 
   const interval = setInterval(async () => {
     if (inst.status !== 'auditing') {
@@ -310,34 +314,30 @@ function pollAuditCompletion(name, sessionId) {
       return;
     }
 
-    // Skip initial grace period to avoid false-positive completion
+    // Skip initial grace period
     if (gracePolls > 0) {
       gracePolls--;
       return;
     }
 
     try {
-      // Step 1: Check session status map
       const statusRes = await ocFetch(globalServer.port, '/session/status');
-      if (statusRes.data && statusRes.data[sessionId]) {
-        const st = statusRes.data[sessionId];
-        if (st.type === 'busy' || st.type === 'retry') {
-          // Still actively working, keep polling
-          return;
-        }
+      const st = statusRes.data && statusRes.data[sessionId];
+
+      if (st && (st.type === 'busy' || st.type === 'retry')) {
+        // Agent is actively working, reset idle counter
+        consecutiveIdle = 0;
+        return;
       }
 
-      // Step 2: Session not in status map (or idle) — verify via messages
-      // OpenCode omits idle sessions from the status map entirely
-      const msgsRes = await ocFetch(globalServer.port, `/session/${sessionId}/message`);
-      if (msgsRes.data && Array.isArray(msgsRes.data) && msgsRes.data.length > 0) {
-        const lastMsg = msgsRes.data[msgsRes.data.length - 1];
-        if (lastMsg && lastMsg.info && lastMsg.info.role === 'assistant' && lastMsg.info.finish) {
-          inst.status = 'completed';
-          broadcast('instance.update', getInstanceSummary(inst));
-          clearInterval(interval);
-          onAuditFinished(name);
-        }
+      // Session not in status map or explicitly idle
+      consecutiveIdle++;
+
+      if (consecutiveIdle >= IDLE_THRESHOLD) {
+        inst.status = 'completed';
+        broadcast('instance.update', getInstanceSummary(inst));
+        clearInterval(interval);
+        onAuditFinished(name);
       }
     } catch {}
   }, 2000);
