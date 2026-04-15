@@ -186,7 +186,7 @@
                 >
                 <div class="chat-header-actions">
                   <label class="auto-refresh-toggle" title="自动拉取最新消息">
-                    <input type="checkbox" id="toggle-auto-refresh" />
+                    <input type="checkbox" id="toggle-auto-refresh" onchange="App.toggleAutoRefresh(this.checked)" />
                     <span class="slider"></span>
                     <span class="label-text">自动刷新</span>
                   </label>

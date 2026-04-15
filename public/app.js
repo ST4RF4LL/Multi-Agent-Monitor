@@ -14,6 +14,7 @@ const App = (() => {
   let totalInstances = 0;
   let currentProjectRoot = '';
   let currentModel = '';
+  const instanceAutoRefresh = new Map(); // per-instance auto-refresh state
 
   const API = '';
 
@@ -107,15 +108,19 @@ const App = (() => {
           }
           
           if (data.status === 'auditing') {
-            const toggle = $('toggle-auto-refresh');
-            if (toggle) toggle.checked = true;
+            instanceAutoRefresh.set(data.name, true);
           }
 
-          // Auto-refresh messages if status changed to completed
+          // Auto-disable refresh when completed or errored
           if (data.status === 'completed' || data.status === 'error') {
-            const toggle = $('toggle-auto-refresh');
-            if (toggle) toggle.checked = false;
+            instanceAutoRefresh.set(data.name, false);
             refreshMessages();
+          }
+
+          // Sync the UI toggle if this is the currently viewed instance
+          const toggle = $('toggle-auto-refresh');
+          if (toggle) {
+            toggle.checked = !!instanceAutoRefresh.get(data.name);
           }
         }
     });
@@ -285,6 +290,12 @@ const App = (() => {
       instSel.value = selectedInstance.model || '';
     }
 
+    // Restore per-instance auto-refresh toggle state
+    const toggle = $('toggle-auto-refresh');
+    if (toggle) {
+      toggle.checked = !!instanceAutoRefresh.get(name);
+    }
+
     // Load messages if session exists
     if (currentSessionId) {
       await refreshMessages();
@@ -414,8 +425,8 @@ const App = (() => {
     sessionPollTimer = setInterval(async () => {
       if (!selectedInstance) return;
       
-      const toggle = $('toggle-auto-refresh');
-      if (toggle && !toggle.checked) return;
+      // Check per-instance auto-refresh state
+      if (!instanceAutoRefresh.get(selectedInstance.name)) return;
       
       if (currentSessionId) {
         await refreshMessages();
@@ -433,7 +444,8 @@ const App = (() => {
     const text = input.value.trim();
     if (!text || !selectedInstance) return;
 
-    // Enable auto-refresh when sending a message
+    // Enable auto-refresh for this specific instance
+    instanceAutoRefresh.set(selectedInstance.name, true);
     const toggle = $('toggle-auto-refresh');
     if (toggle) toggle.checked = true;
 
@@ -756,6 +768,11 @@ const App = (() => {
     }
   }
 
+  function toggleAutoRefresh(checked) {
+    if (!selectedInstance) return;
+    instanceAutoRefresh.set(selectedInstance.name, checked);
+  }
+
   // ─── Public API ──────────────────────────────────────────────────────
 
   return {
@@ -771,5 +788,6 @@ const App = (() => {
     selectInstance,
     setGlobalModel,
     setInstanceModel,
+    toggleAutoRefresh,
   };
 })();
