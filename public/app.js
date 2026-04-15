@@ -526,6 +526,21 @@ const App = (() => {
     }
   }
 
+  async function restartCurrentInstance() {
+    if (!selectedInstance) return;
+    try {
+      toast('正在重启实例...', 'info');
+      await api(`/api/instances/${selectedInstance.name}/stop`, { method: 'POST' });
+      await api(`/api/instances/${selectedInstance.name}/start`, { method: 'POST' });
+      toast('✅ 实例已重启并就绪', 'success');
+      currentSessionId = null;
+      messages = [];
+      renderMessages();
+    } catch (err) {
+      toast('重启失败: ' + err.message, 'error');
+    }
+  }
+
   // ─── Launch / Setup ──────────────────────────────────────────────────
 
   async function launch() {
@@ -785,6 +800,7 @@ const App = (() => {
     onChatKeyDown,
     refreshMessages,
     abortCurrentSession,
+    restartCurrentInstance,
     selectInstance,
     setGlobalModel,
     setInstanceModel,

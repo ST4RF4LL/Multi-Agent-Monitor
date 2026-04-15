@@ -29,6 +29,8 @@ let globalServer = {
   lastErrorLog: null,
 };
 
+let ocEventSource = null; // SSE connection to OpenCode /global/event
+
 // Virtual Instances => Maps to a Session on globalServer
 // Instance = { name, dir, status, sessionId, error, startedAt }
 const instances = new Map();
@@ -176,6 +178,7 @@ async function startGlobalServer() {
 
         console.log(`[SYSTEM] Global OpenCode Server Ready!`);
         globalServer.status = 'ready';
+        subscribeToOpenCodeEvents();
         return { ok: true };
       }
     } catch {}
@@ -196,6 +199,86 @@ async function stopGlobalServer() {
   globalServer.process = null;
   globalServer.pid = null;
   globalServer.status = 'stopped';
+  if (ocEventSource) {
+    ocEventSource.destroy();
+    ocEventSource = null;
+  }
+}
+
+// ─── OpenCode SSE Event Subscription ─────────────────────────────────────────
+
+function subscribeToOpenCodeEvents() {
+  if (ocEventSource) {
+    ocEventSource.destroy();
+    ocEventSource = null;
+  }
+
+  console.log('[SSE-OC] Subscribing to OpenCode /global/event...');
+
+  const req = http.get(`http://127.0.0.1:${globalServer.port}/global/event`, {
+    headers: { 'Accept': 'text/event-stream' }
+  }, (res) => {
+    if (res.statusCode !== 200) {
+      console.error('[SSE-OC] Failed to connect, status:', res.statusCode);
+      return;
+    }
+    console.log('[SSE-OC] Connected to OpenCode event stream');
+
+    let buffer = '';
+    res.on('data', (chunk) => {
+      buffer += chunk.toString();
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop();
+
+      for (const part of parts) {
+        if (!part.trim()) continue;
+        const lines = part.split('\n');
+        let data = '';
+        for (const line of lines) {
+          if (line.startsWith('data:')) data = line.slice(5).trim();
+        }
+        if (!data) continue;
+
+        try {
+          const parsed = JSON.parse(data);
+          const type = parsed.payload && parsed.payload.type;
+          const props = parsed.payload && parsed.payload.properties;
+
+          if (type === 'session.idle' && props && props.sessionID) {
+            handleSessionIdle(props.sessionID);
+          }
+        } catch {}
+      }
+    });
+
+    res.on('end', () => {
+      console.log('[SSE-OC] Event stream ended, reconnecting in 3s...');
+      setTimeout(() => {
+        if (globalServer.status === 'ready') subscribeToOpenCodeEvents();
+      }, 3000);
+    });
+  });
+
+  req.on('error', (err) => {
+    console.error('[SSE-OC] Connection error:', err.message, '— reconnecting in 5s...');
+    setTimeout(() => {
+      if (globalServer.status === 'ready') subscribeToOpenCodeEvents();
+    }, 5000);
+  });
+
+  ocEventSource = req;
+}
+
+function handleSessionIdle(sessionId) {
+  for (const [name, inst] of instances) {
+    if (inst.sessionId === sessionId && inst.status === 'auditing') {
+      console.log(`[SSE-OC] session.idle received for ${name} (${sessionId})`);
+      inst.status = 'completed';
+      broadcast('instance.update', getInstanceSummary(inst));
+      onAuditFinished(name);
+      return;
+    }
+  }
 }
 
 // ─── Virtual Process Manager ─────────────────────────────────────────────────
@@ -293,58 +376,16 @@ async function runAuditForInstance(name) {
   }
 }
 
+// pollAuditCompletion is now just a safety-net timeout.
+// Real completion detection is handled by SSE session.idle events.
 function pollAuditCompletion(name, sessionId) {
   const inst = instances.get(name);
   if (!inst) return;
 
-  // Grace period: skip initial polls to let OpenCode register the session as "busy"
-  let gracePolls = 5; // 10 seconds grace
-  // Require consecutive idle detections to confirm completion
-  // (avoids false positives during brief idle gaps between agent steps)
-  let consecutiveIdle = 0;
-  const IDLE_THRESHOLD = 3; // 3 consecutive idle checks (6 seconds of sustained idle)
-
-  const interval = setInterval(async () => {
-    if (inst.status !== 'auditing') {
-      clearInterval(interval);
-      return;
-    }
-    if (globalServer.status !== 'ready') {
-      clearInterval(interval);
-      return;
-    }
-
-    // Skip initial grace period
-    if (gracePolls > 0) {
-      gracePolls--;
-      return;
-    }
-
-    try {
-      const statusRes = await ocFetch(globalServer.port, '/session/status');
-      const st = statusRes.data && statusRes.data[sessionId];
-
-      if (st && (st.type === 'busy' || st.type === 'retry')) {
-        // Agent is actively working, reset idle counter
-        consecutiveIdle = 0;
-        return;
-      }
-
-      // Session not in status map or explicitly idle
-      consecutiveIdle++;
-
-      if (consecutiveIdle >= IDLE_THRESHOLD) {
-        inst.status = 'completed';
-        broadcast('instance.update', getInstanceSummary(inst));
-        clearInterval(interval);
-        onAuditFinished(name);
-      }
-    } catch {}
-  }, 2000);
-
+  // Safety timeout: if SSE somehow misses the event, force complete after 30 min
   setTimeout(() => {
-    clearInterval(interval);
     if (inst.status === 'auditing') {
+      console.log(`[TIMEOUT] Force-completing ${name} after 30min timeout`);
       inst.status = 'completed';
       broadcast('instance.update', getInstanceSummary(inst));
       onAuditFinished(name);
