@@ -31,7 +31,8 @@ A web-based monitor and orchestrator for running multiple OpenCode instances in 
     *(Optional: You can specify a custom port by setting the PORT environment variable, e.g., `set PORT=3030 && npm start`)*
 2.  Open your browser and navigate to `http://localhost:8888`.
 3.  In the Setup screen, provide:
-    *   **Project Root:** The directory containing your microservice subdirectories.
+    *   **OpenCode Root:** The directory containing your OpenCode agent/config settings. This is used as the `opencode serve` working directory.
+    *   **Project Root:** The directory containing the projects or microservice subdirectories to audit.
     *   **Audit Prompt:** The initial prompt to send to each instance.
     *   **Max Concurrent:** The number of instances to run simultaneously.
     *   **Starting Port:** The base port number for the instances.
@@ -41,3 +42,9 @@ A web-based monitor and orchestrator for running multiple OpenCode instances in 
 ## Configuration
 
 You can optionally create a `config.json` based on `config.example.json` to pre-fill settings.
+
+`openCodeRoot` and `projectRoot` are intentionally separate:
+
+*   `openCodeRoot` is where OpenCode loads agent/config files from.
+*   `projectRoot` is scanned for audited subdirectories, and each OpenCode session receives the exact target subdirectory in its prompt.
+*   If `openCodeRoot` is omitted, the monitor falls back to `projectRoot` for backward compatibility.

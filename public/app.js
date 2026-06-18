@@ -12,6 +12,7 @@ const App = (() => {
   let pollTimer = null;
   let sessionPollTimer = null;
   let totalInstances = 0;
+  let currentOpenCodeRoot = '';
   let currentProjectRoot = '';
   let currentModel = '';
   const instanceAutoRefresh = new Map(); // per-instance auto-refresh state
@@ -68,10 +69,11 @@ const App = (() => {
   }
 
   function getSessionUrl(sessionId, port = 4100) {
-    if (!sessionId || !currentProjectRoot) return '#';
+    const rootForUrl = currentOpenCodeRoot || currentProjectRoot;
+    if (!sessionId || !rootForUrl) return '#';
     try {
       // Normalize Windows backslashes to forward slashes (OpenCode expects '/')
-      const normalizedRoot = currentProjectRoot.replace(/\\/g, '/');
+      const normalizedRoot = rootForUrl.replace(/\\/g, '/');
       // Base64Url encode the project root without padding
       const b64 = btoa(unescape(encodeURIComponent(normalizedRoot)))
                   .replace(/=+$/, '')
@@ -544,6 +546,7 @@ const App = (() => {
   // ─── Launch / Setup ──────────────────────────────────────────────────
 
   async function launch() {
+    const openCodeRoot = $('input-opencode-root').value.trim();
     const projectRoot = $('input-project-root').value.trim();
     const auditPrompt = $('input-audit-prompt').value.trim();
     const maxConcurrent = parseInt($('input-max-concurrent').value) || 3;
@@ -551,7 +554,7 @@ const App = (() => {
     const model = $('input-model').value.trim();
 
     if (!projectRoot) {
-      toast('请输入项目根目录', 'error');
+      toast('请输入被测项目根目录', 'error');
       return;
     }
     if (!auditPrompt) {
@@ -567,7 +570,7 @@ const App = (() => {
       // Save config globally
       const configRes = await api('/api/config', {
         method: 'POST',
-        body: { projectRoot, auditPrompt, maxConcurrent, portStart, model },
+        body: { openCodeRoot, projectRoot, auditPrompt, maxConcurrent, portStart, model },
       });
 
       if (configRes.error) {
@@ -575,6 +578,7 @@ const App = (() => {
         return;
       }
       
+      currentOpenCodeRoot = openCodeRoot || projectRoot;
       currentProjectRoot = projectRoot;
       currentModel = model;
 
@@ -625,6 +629,21 @@ const App = (() => {
     if (sessionPollTimer) clearInterval(sessionPollTimer);
     selectedInstance = null;
     currentSessionId = null;
+  }
+
+  function applyConfigToSetup(config) {
+    if (!config) return;
+
+    currentOpenCodeRoot = config.openCodeRoot || config.projectRoot || '';
+    currentProjectRoot = config.projectRoot || '';
+    currentModel = config.model || '';
+
+    if ($('input-opencode-root')) $('input-opencode-root').value = config.openCodeRoot || '';
+    if ($('input-project-root')) $('input-project-root').value = config.projectRoot || '';
+    if ($('input-audit-prompt')) $('input-audit-prompt').value = config.auditPrompt || '';
+    if ($('input-max-concurrent')) $('input-max-concurrent').value = config.maxConcurrent || 3;
+    if ($('input-port-start')) $('input-port-start').value = config.portStart || 4100;
+    if ($('input-model')) $('input-model').value = config.model || '';
   }
 
   // ─── Batch Operations ────────────────────────────────────────────────
@@ -703,6 +722,12 @@ const App = (() => {
       input.addEventListener('input', autoResizeInput);
     }
 
+    let serverConfig = null;
+    try {
+      serverConfig = await api('/api/config');
+      applyConfigToSetup(serverConfig);
+    } catch {}
+
     // Load models
     try {
       const db = await api('/api/models');
@@ -733,18 +758,10 @@ const App = (() => {
     try {
       const existing = await api('/api/instances');
       if (Array.isArray(existing) && existing.length > 0) {
-        const config = await api('/api/config');
-        currentProjectRoot = config.projectRoot;
-        currentModel = config.model || '';
+        const config = serverConfig || await api('/api/config');
+        applyConfigToSetup(config);
         instances = existing;
         totalInstances = instances.length;
-
-        // Pre-fill setup form with existing config
-        if (config.projectRoot) $('input-project-root').value = config.projectRoot;
-        if (config.auditPrompt) $('input-audit-prompt').value = config.auditPrompt;
-        if (config.maxConcurrent) $('input-max-concurrent').value = config.maxConcurrent;
-        if (config.portStart) $('input-port-start').value = config.portStart;
-        if (config.model) $('input-model').value = config.model;
 
         // Switch to monitor
         $('setup-screen').style.display = 'none';

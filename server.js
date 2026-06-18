@@ -12,6 +12,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 // ─── State ───────────────────────────────────────────────────────────────────
 
 let CONFIG = {
+  openCodeRoot: '',
   projectRoot: '',
   auditPrompt: '',
   portStart: 4100, // Global Server Port
@@ -41,6 +42,52 @@ let auditQueue = [];
 let activeAudits = 0;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function cleanPath(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function isDirectory(dir) {
+  try {
+    return !!dir && fs.statSync(dir).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function getOpenCodeRoot() {
+  return CONFIG.openCodeRoot || CONFIG.projectRoot || process.cwd();
+}
+
+function getServerIdentity() {
+  return `${getOpenCodeRoot()}::${CONFIG.portStart}`;
+}
+
+function loadConfigFile() {
+  const configPath = path.join(__dirname, 'config.json');
+  if (!fs.existsSync(configPath)) return;
+
+  try {
+    const fileConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    const openCodeRoot =
+      cleanPath(fileConfig.openCodeRoot) ||
+      cleanPath(fileConfig.opencodeRoot) ||
+      cleanPath(fileConfig.agentRoot);
+
+    if (openCodeRoot) CONFIG.openCodeRoot = openCodeRoot;
+    if (typeof fileConfig.projectRoot === 'string') CONFIG.projectRoot = cleanPath(fileConfig.projectRoot);
+    if (typeof fileConfig.auditPrompt === 'string') CONFIG.auditPrompt = fileConfig.auditPrompt;
+    if (fileConfig.portStart) CONFIG.portStart = Number(fileConfig.portStart);
+    if (fileConfig.portRange?.start) CONFIG.portStart = Number(fileConfig.portRange.start);
+    if (fileConfig.backendPort && !process.env.PORT) CONFIG.backendPort = Number(fileConfig.backendPort);
+    if (fileConfig.maxConcurrent) CONFIG.maxConcurrent = Number(fileConfig.maxConcurrent);
+    if (typeof fileConfig.model === 'string') CONFIG.model = fileConfig.model;
+  } catch (err) {
+    console.error('[CONFIG] Failed to load config.json:', err.message);
+  }
+}
+
+loadConfigFile();
 
 function ocFetch(port, urlPath, options = {}) {
   return new Promise((resolve, reject) => {
@@ -93,6 +140,29 @@ function getInstanceSummary(inst) {
   };
 }
 
+function buildTargetDirectoryInstruction(inst) {
+  return `⚠️ 重要指令：请只在以下目标工作目录中执行任务，不要分析外部的兄弟目录文件。\n目标工作目录: [${inst.dir}]`;
+}
+
+function withTargetDirectoryContext(body, inst) {
+  const promptBody = body && typeof body === 'object' ? { ...body } : {};
+  const instruction = buildTargetDirectoryInstruction(inst);
+  const parts = Array.isArray(promptBody.parts) ? [...promptBody.parts] : [];
+  const firstTextIndex = parts.findIndex((part) => part && part.type === 'text');
+
+  if (firstTextIndex >= 0) {
+    const part = parts[firstTextIndex];
+    parts[firstTextIndex] = {
+      ...part,
+      text: `${instruction}\n\n---用户请求---\n${part.text || part.content || ''}`,
+    };
+  } else {
+    parts.unshift({ type: 'text', text: instruction });
+  }
+
+  return { ...promptBody, parts };
+}
+
 // ─── Global Server Manager ───────────────────────────────────────────────────
 
 async function startGlobalServer() {
@@ -107,7 +177,14 @@ async function startGlobalServer() {
     return { error: 'Global server failed to start' };
   }
 
-  console.log(`[SYSTEM] Starting Global OpenCode Server at ${CONFIG.projectRoot} (Port: ${CONFIG.portStart})`);
+  const openCodeRoot = getOpenCodeRoot();
+  if (!isDirectory(openCodeRoot)) {
+    globalServer.status = 'error';
+    globalServer.error = `Invalid OpenCode settings root: ${openCodeRoot}`;
+    return { error: globalServer.error };
+  }
+
+  console.log(`[SYSTEM] Starting Global OpenCode Server at ${openCodeRoot} (Port: ${CONFIG.portStart})`);
   globalServer.status = 'starting';
   globalServer.port = CONFIG.portStart;
   globalServer.error = null;
@@ -118,7 +195,7 @@ async function startGlobalServer() {
   };
 
   const proc = spawn('opencode', ['serve', '--port', String(globalServer.port), '--hostname', '127.0.0.1'], {
-    cwd: CONFIG.projectRoot, // Important: Global server anchors at the root
+    cwd: openCodeRoot, // OpenCode agent/config workspace, separate from the audited project root
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
     shell: true,
@@ -354,13 +431,10 @@ async function runAuditForInstance(name) {
     inst.status = 'auditing';
     broadcast('instance.update', getInstanceSummary(inst));
 
-    // The agent runs in the projectRoot, so we give it the exact relative/absolute path to focus on.
-    const contextualPrompt = `⚠️ 重要指令：请只在以下子目录路径中执行此任务，不要分析外部的兄弟目录文件。\n目标工作目录: [${inst.dir}]\n\n---任务要求---\n${CONFIG.auditPrompt}`;
-
-    const promptBody = {
-      parts: [{ type: 'text', text: contextualPrompt }],
+    const promptBody = withTargetDirectoryContext({
+      parts: [{ type: 'text', text: `---任务要求---\n${CONFIG.auditPrompt}` }],
       model: inst.model || CONFIG.model || undefined,
-    };
+    }, inst);
 
     await ocFetch(globalServer.port, `/session/${inst.sessionId}/prompt_async`, {
       method: 'POST',
@@ -431,18 +505,31 @@ app.get('/api/events', (req, res) => {
 
 // Config
 app.post('/api/config', (req, res) => {
-  const { projectRoot, auditPrompt, maxConcurrent, portStart, model } = req.body;
-  
-  if (projectRoot && projectRoot !== CONFIG.projectRoot) {
-    // Root changed, stop global server
-    stopGlobalServer();
+  const { auditPrompt, maxConcurrent, portStart, model } = req.body;
+  const hasOpenCodeRoot = Object.prototype.hasOwnProperty.call(req.body, 'openCodeRoot');
+  const hasProjectRoot = Object.prototype.hasOwnProperty.call(req.body, 'projectRoot');
+  const openCodeRoot = hasOpenCodeRoot ? cleanPath(req.body.openCodeRoot) : CONFIG.openCodeRoot;
+  const projectRoot = hasProjectRoot ? cleanPath(req.body.projectRoot) : CONFIG.projectRoot;
+  const previousServerIdentity = getServerIdentity();
+
+  if (openCodeRoot && !isDirectory(openCodeRoot)) {
+    return res.status(400).json({ error: 'Invalid OpenCode settings root' });
   }
-  
-  if (projectRoot) CONFIG.projectRoot = projectRoot;
+  if (projectRoot && !isDirectory(projectRoot)) {
+    return res.status(400).json({ error: 'Invalid project root' });
+  }
+
+  if (hasOpenCodeRoot) CONFIG.openCodeRoot = openCodeRoot;
+  if (hasProjectRoot) CONFIG.projectRoot = projectRoot;
   if (auditPrompt) CONFIG.auditPrompt = auditPrompt;
   if (maxConcurrent) CONFIG.maxConcurrent = Number(maxConcurrent);
   if (portStart) CONFIG.portStart = Number(portStart);
   if (model !== undefined) CONFIG.model = model;
+
+  if (getServerIdentity() !== previousServerIdentity) {
+    stopGlobalServer();
+  }
+
   res.json({ ok: true, config: CONFIG });
 });
 
@@ -452,15 +539,18 @@ app.get('/api/config', (req, res) => {
 
 // Scan project root for subdirectories
 app.post('/api/scan', (req, res) => {
-  const root = req.body.projectRoot || CONFIG.projectRoot;
-  if (!root || !fs.existsSync(root)) {
+  const root = cleanPath(req.body.projectRoot) || CONFIG.projectRoot;
+  const previousServerIdentity = getServerIdentity();
+
+  if (!isDirectory(root)) {
     return res.status(400).json({ error: 'Invalid project root' });
   }
 
-  if (root !== CONFIG.projectRoot) {
+  CONFIG.projectRoot = root;
+
+  if (getServerIdentity() !== previousServerIdentity) {
     stopGlobalServer();
   }
-  CONFIG.projectRoot = root;
 
   const dirs = fs.readdirSync(root, { withFileTypes: true })
     .filter((d) => d.isDirectory() && !d.name.startsWith('.'))
@@ -489,18 +579,18 @@ app.post('/api/scan', (req, res) => {
 
 // Get available models dynamically from OpenCode global server
 app.get('/api/models', async (req, res) => {
-  const oldRoot = CONFIG.projectRoot;
+  const oldOpenCodeRoot = CONFIG.openCodeRoot;
   let changed = false;
   
-  if (!CONFIG.projectRoot) {
-    CONFIG.projectRoot = process.cwd();
+  if (!CONFIG.openCodeRoot && !CONFIG.projectRoot) {
+    CONFIG.openCodeRoot = process.cwd();
     changed = true;
   }
 
   const startRes = await startGlobalServer();
   
   if (changed) {
-    CONFIG.projectRoot = oldRoot;
+    CONFIG.openCodeRoot = oldOpenCodeRoot;
   }
   
   if (startRes.error) return res.status(500).json({ error: startRes.error });
@@ -697,7 +787,7 @@ app.post('/api/instances/:name/prompt/:sessionId', async (req, res) => {
   try {
     await ocFetch(globalServer.port, `/session/${req.params.sessionId}/prompt_async`, {
       method: 'POST',
-      body: req.body,
+      body: withTargetDirectoryContext(req.body, inst),
     });
     
     // Explicitly transition to auditing and start the official robust poll completion checker
