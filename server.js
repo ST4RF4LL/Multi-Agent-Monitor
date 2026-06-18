@@ -198,6 +198,10 @@ function ocFetch(port, urlPath, options = {}) {
   });
 }
 
+function sessionPath(sessionId, suffix = '') {
+  return `/session/${encodeURIComponent(sessionId)}${suffix}`;
+}
+
 function broadcast(event, data) {
   const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   for (const client of sseClients) {
@@ -493,7 +497,7 @@ async function stopInstance(id) {
 
   if (inst.sessionId && globalServer.status === 'ready') {
     try {
-      await ocFetch(globalServer.port, `/session/${inst.sessionId}/abort`, { method: 'POST' });
+      await ocFetch(globalServer.port, sessionPath(inst.sessionId, '/abort'), { method: 'POST' });
     } catch {}
   }
   
@@ -517,7 +521,7 @@ async function runAuditForInstance(id) {
       model: inst.model || CONFIG.model || undefined,
     }, inst);
 
-    await ocFetch(globalServer.port, `/session/${inst.sessionId}/prompt_async`, {
+    await ocFetch(globalServer.port, sessionPath(inst.sessionId, '/prompt_async'), {
       method: 'POST',
       body: promptBody,
     });
@@ -549,7 +553,7 @@ function pollAuditCompletion(id, sessionId) {
 }
 
 function onAuditFinished(id) {
-  activeAudits--;
+  activeAudits = Math.max(0, activeAudits - 1);
   processAuditQueue();
 }
 
@@ -557,9 +561,9 @@ function processAuditQueue() {
   while (auditQueue.length > 0 && activeAudits < CONFIG.maxConcurrent) {
     const id = auditQueue.shift();
     const inst = instances.get(id);
-    if (inst && inst.status === 'ready') {
+    if (inst && isAuditQueueCandidate(inst.status)) {
       activeAudits++;
-      runAuditForInstance(id);
+      runQueuedAudit(id);
     }
   }
   broadcast('audit.queue', {
@@ -567,6 +571,40 @@ function processAuditQueue() {
     active: activeAudits,
     max: CONFIG.maxConcurrent,
   });
+}
+
+function isAuditQueueCandidate(status) {
+  return status === 'ready' || status === 'stopped' || status === 'error' || status === 'completed';
+}
+
+async function runQueuedAudit(id) {
+  const inst = instances.get(id);
+  if (!inst) {
+    onAuditFinished(id);
+    return;
+  }
+
+  try {
+    if (inst.status !== 'ready') {
+      const startRes = await startInstance(id);
+      if (startRes.error) throw new Error(startRes.error);
+    }
+
+    const readyInst = instances.get(id);
+    if (!readyInst || readyInst.status !== 'ready') {
+      throw new Error(`Instance ${inst.name} is ${readyInst?.status || 'missing'}, not ready`);
+    }
+
+    await runAuditForInstance(id);
+  } catch (err) {
+    const failedInst = instances.get(id);
+    if (failedInst) {
+      failedInst.status = 'error';
+      failedInst.error = err.message;
+      broadcast('instance.update', getInstanceSummary(failedInst));
+    }
+    onAuditFinished(id);
+  }
 }
 
 // ─── API Routes ──────────────────────────────────────────────────────────────
@@ -773,23 +811,16 @@ app.post('/api/audit/start', async (req, res) => {
 
   auditQueue = [];
   activeAudits = 0;
-  const needStart = [];
 
   for (const [id, inst] of instances) {
-    if (inst.status === 'ready') {
+    if (isAuditQueueCandidate(inst.status)) {
       auditQueue.push(id);
-    } else if (inst.status === 'stopped' || inst.status === 'error' || inst.status === 'completed') {
-      needStart.push(id);
     }
   }
 
   // Pre-start the global server so we don't start it multiple times simultaneously in poor locking
-  await startGlobalServer();
-
-  for (const id of needStart) {
-    await startInstance(id);
-    auditQueue.push(id);
-  }
+  const startRes = await startGlobalServer();
+  if (startRes.error) return res.status(500).json({ error: startRes.error });
 
   processAuditQueue();
 
@@ -822,7 +853,7 @@ app.post('/api/audit/:id/abort', async (req, res) => {
   if (!inst.sessionId) return res.status(400).json({ error: 'No active session' });
 
   try {
-    await ocFetch(globalServer.port, `/session/${inst.sessionId}/abort`, { method: 'POST' });
+    await ocFetch(globalServer.port, sessionPath(inst.sessionId, '/abort'), { method: 'POST' });
     inst.status = 'ready';
     broadcast('instance.update', getInstanceSummary(inst));
     res.json({ ok: true });
@@ -844,9 +875,11 @@ app.get('/api/instances/:id/sessions', async (req, res) => {
 });
 
 app.get('/api/instances/:id/messages/:sessionId', async (req, res) => {
+  const inst = instances.get(req.params.id);
+  if (!inst) return res.status(404).json({ error: 'Not found' });
   if (globalServer.status !== 'ready') return res.status(502).json({ error: 'Global server offline' });
   try {
-    const r = await ocFetch(globalServer.port, `/session/${req.params.sessionId}/message`);
+    const r = await ocFetch(globalServer.port, sessionPath(req.params.sessionId, '/message'));
     res.json(r.data);
   } catch (err) {
     res.status(502).json({ error: err.message });
@@ -854,9 +887,11 @@ app.get('/api/instances/:id/messages/:sessionId', async (req, res) => {
 });
 
 app.post('/api/instances/:id/message/:sessionId', async (req, res) => {
+  const inst = instances.get(req.params.id);
+  if (!inst) return res.status(404).json({ error: 'Not found' });
   if (globalServer.status !== 'ready') return res.status(502).json({ error: 'Global server offline' });
   try {
-    const r = await ocFetch(globalServer.port, `/session/${req.params.sessionId}/message`, {
+    const r = await ocFetch(globalServer.port, sessionPath(req.params.sessionId, '/message'), {
       method: 'POST',
       body: req.body,
     });
@@ -871,7 +906,7 @@ app.post('/api/instances/:id/prompt/:sessionId', async (req, res) => {
   if (!inst) return res.status(404).json({ error: 'Not found' });
   if (globalServer.status !== 'ready') return res.status(502).json({ error: 'Global server offline' });
   try {
-    await ocFetch(globalServer.port, `/session/${req.params.sessionId}/prompt_async`, {
+    await ocFetch(globalServer.port, sessionPath(req.params.sessionId, '/prompt_async'), {
       method: 'POST',
       body: withTargetDirectoryContext(req.body, inst),
     });
@@ -900,9 +935,11 @@ app.get('/api/instances/:id/session-status', async (req, res) => {
 });
 
 app.post('/api/instances/:id/abort/:sessionId', async (req, res) => {
+  const inst = instances.get(req.params.id);
+  if (!inst) return res.status(404).json({ error: 'Not found' });
   if (globalServer.status !== 'ready') return res.status(502).json({ error: 'Global server offline' });
   try {
-    const r = await ocFetch(globalServer.port, `/session/${req.params.sessionId}/abort`, { method: 'POST' });
+    const r = await ocFetch(globalServer.port, sessionPath(req.params.sessionId, '/abort'), { method: 'POST' });
     res.json(r.data);
   } catch (err) {
     res.status(502).json({ error: err.message });

@@ -46,6 +46,10 @@ const App = (() => {
     return `/api/instances/${encodeURIComponent(id)}${suffix}`;
   }
 
+  function sessionSuffix(route, sessionId) {
+    return `${route}/${encodeURIComponent(sessionId)}`;
+  }
+
   function instanceCardId(instOrId) {
     const id = typeof instOrId === 'string' ? instOrId : instanceKey(instOrId);
     return `card-${id}`;
@@ -63,6 +67,28 @@ const App = (() => {
     const div = document.createElement('div');
     div.textContent = str;
     return div.innerHTML;
+  }
+
+  function normalizeMessages(payload) {
+    if (Array.isArray(payload)) return payload;
+    if (Array.isArray(payload?.messages)) return payload.messages;
+    if (Array.isArray(payload?.data)) return payload.data;
+    if (Array.isArray(payload?.items)) return payload.items;
+    if (payload?.data && typeof payload.data === 'object') return Object.values(payload.data);
+    if (payload && typeof payload === 'object') {
+      return Object.values(payload).filter((item) =>
+        item && typeof item === 'object' && (item.info || item.parts || item.role || item.content || item.text)
+      );
+    }
+    return [];
+  }
+
+  function normalizeMessageParts(msg) {
+    if (Array.isArray(msg.parts)) return msg.parts;
+    if (Array.isArray(msg.content)) return msg.content;
+    if (typeof msg.content === 'string') return [{ type: 'text', text: msg.content }];
+    if (typeof msg.text === 'string') return [{ type: 'text', text: msg.text }];
+    return [];
   }
 
   function formatText(text) {
@@ -93,9 +119,9 @@ const App = (() => {
                   .replace(/=+$/, '')
                   .replace(/\+/g, '-')
                   .replace(/\//g, '_');
-      return `http://127.0.0.1:${port}/${b64}/session/${sessionId}`;
+      return `http://127.0.0.1:${port}/${b64}/session/${encodeURIComponent(sessionId)}`;
     } catch {
-      return `http://127.0.0.1:${port}/?session_id=${sessionId}`;
+      return `http://127.0.0.1:${port}/?session_id=${encodeURIComponent(sessionId)}`;
     }
   }
 
@@ -115,7 +141,17 @@ const App = (() => {
       renderStats();
       // If this is the selected instance, update chat header
         if (selectedInstance && instanceKey(selectedInstance) === instanceKey(data)) {
+          const previousSessionId = currentSessionId;
           selectedInstance = data;
+
+          if (data.sessionId && currentSessionId !== data.sessionId) {
+            currentSessionId = data.sessionId;
+          } else if (!data.sessionId && currentSessionId) {
+            currentSessionId = null;
+            messages = [];
+            renderMessages();
+          }
+
           updateChatHeader();
           
           const instSel = $('instance-model-select');
@@ -130,6 +166,8 @@ const App = (() => {
           // Auto-disable refresh when completed or errored
           if (data.status === 'completed' || data.status === 'error') {
             instanceAutoRefresh.set(instanceKey(data), false);
+            refreshMessages();
+          } else if (!previousSessionId && currentSessionId) {
             refreshMessages();
           }
 
@@ -355,10 +393,8 @@ const App = (() => {
     }
 
     try {
-      const data = await api(instanceApiPath(selectedInstance, `/messages/${currentSessionId}`));
-      if (Array.isArray(data)) {
-        messages = data;
-      }
+      const data = await api(instanceApiPath(selectedInstance, sessionSuffix('/messages', currentSessionId)));
+      messages = normalizeMessages(data);
       renderMessages();
     } catch (err) {
       console.error('Failed to load messages:', err);
@@ -380,9 +416,9 @@ const App = (() => {
     }
 
     for (const msg of messages) {
-      const info = msg.info;
-      const parts = msg.parts || [];
-      const role = info.role || 'assistant';
+      const info = msg.info || {};
+      const parts = normalizeMessageParts(msg);
+      const role = info.role || msg.role || 'assistant';
 
       const msgEl = document.createElement('div');
       msgEl.className = `message ${role}`;
@@ -498,7 +534,7 @@ const App = (() => {
 
     try {
       // Send async prompt
-      await api(instanceApiPath(selectedInstance, `/prompt/${currentSessionId}`), {
+      await api(instanceApiPath(selectedInstance, sessionSuffix('/prompt', currentSessionId)), {
         method: 'POST',
         body: {
           model: selectedInstance.model || undefined,
@@ -536,7 +572,7 @@ const App = (() => {
   async function abortCurrentSession() {
     if (!selectedInstance || !currentSessionId) return;
     try {
-      await api(instanceApiPath(selectedInstance, `/abort/${currentSessionId}`), {
+      await api(instanceApiPath(selectedInstance, sessionSuffix('/abort', currentSessionId)), {
         method: 'POST',
       });
       toast('已发送中止请求', 'info');
@@ -715,11 +751,16 @@ const App = (() => {
             const updated = instances.find(i => instanceKey(i) === selectedKey);
             if (updated) {
               const statusChanged = selectedInstance.status !== updated.status;
-              const sessionChanged = selectedInstance.sessionId !== updated.sessionId;
+              let sessionChanged = false;
               selectedInstance = updated;
 
-              if (sessionChanged && updated.sessionId) {
+              if (updated.sessionId && currentSessionId !== updated.sessionId) {
                 currentSessionId = updated.sessionId;
+                sessionChanged = true;
+              } else if (!updated.sessionId && currentSessionId) {
+                currentSessionId = null;
+                messages = [];
+                sessionChanged = true;
               }
 
               if (statusChanged || sessionChanged) {
