@@ -32,11 +32,11 @@ A web-based monitor and orchestrator for running multiple OpenCode instances in 
 2.  Open your browser and navigate to `http://localhost:8888`.
 3.  In the Setup screen, provide:
     *   **OpenCode Root:** The directory containing your OpenCode agent/config settings. This is used as the `opencode serve` working directory.
-    *   **Project Root:** The directory containing the projects or microservice subdirectories to audit.
+    *   **Project Root:** The directory to scan for audited Git repositories.
     *   **Audit Prompt:** The initial prompt to send to each instance.
     *   **Max Concurrent:** The number of instances to run simultaneously.
     *   **Starting Port:** The base port number for the instances.
-4.  Click "扫描并启动" (Scan and Launch) to discover the subdirectories and start the monitor.
+4.  Click "扫描并启动" (Scan and Launch) to discover Git repositories and start the monitor.
 5.  In the Monitor dashboard, click "批量审计" (Batch Audit) to start the auditing process.
 
 ## Configuration
@@ -46,5 +46,5 @@ You can optionally create a `config.json` based on `config.example.json` to pre-
 `openCodeRoot` and `projectRoot` are intentionally separate:
 
 *   `openCodeRoot` is where OpenCode loads agent/config files from.
-*   `projectRoot` is scanned for audited subdirectories, and each OpenCode session receives the exact target subdirectory in its prompt.
+*   `projectRoot` is scanned recursively for Git repositories. If `projectRoot` itself is a Git repository, it is treated as a single audited project. Each OpenCode session receives the exact target repository path in its prompt.
 *   If `openCodeRoot` is omitted, the monitor falls back to `projectRoot` for backward compatibility.

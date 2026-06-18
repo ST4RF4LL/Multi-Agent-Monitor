@@ -33,7 +33,7 @@ let globalServer = {
 let ocEventSource = null; // SSE connection to OpenCode /global/event
 
 // Virtual Instances => Maps to a Session on globalServer
-// Instance = { name, dir, status, sessionId, error, startedAt }
+// Instance = { id, name, dir, relDir, status, sessionId, error, startedAt }
 const instances = new Map();
 const sseClients = new Set();
 
@@ -53,6 +53,85 @@ function isDirectory(dir) {
   } catch {
     return false;
   }
+}
+
+function isGitRepository(dir) {
+  return fs.existsSync(path.join(dir, '.git'));
+}
+
+const SCAN_IGNORED_DIRS = new Set([
+  '.git',
+  'node_modules',
+  'vendor',
+  'dist',
+  'build',
+  'coverage',
+  '.next',
+  '.nuxt',
+  '.cache',
+]);
+
+function shouldSkipScanDir(name) {
+  return name.startsWith('.') || SCAN_IGNORED_DIRS.has(name);
+}
+
+function toPosixRelative(root, target) {
+  return path.relative(root, target).replace(/\\/g, '/');
+}
+
+function createInstanceId(label, usedIds) {
+  const safe = label
+    .replace(/\\/g, '/')
+    .replace(/^\.\//, '')
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '') || 'root';
+
+  let id = safe;
+  let suffix = 2;
+  while (usedIds.has(id)) {
+    id = `${safe}-${suffix}`;
+    suffix++;
+  }
+  usedIds.add(id);
+  return id;
+}
+
+function discoverGitProjects(root) {
+  const projects = [];
+
+  function walk(currentDir) {
+    if (isGitRepository(currentDir)) {
+      projects.push(currentDir);
+      return;
+    }
+
+    let entries;
+    try {
+      entries = fs.readdirSync(currentDir, { withFileTypes: true });
+    } catch (err) {
+      console.warn(`[SCAN] Skipping unreadable directory ${currentDir}: ${err.message}`);
+      return;
+    }
+
+    entries
+      .filter((entry) => entry.isDirectory() && !shouldSkipScanDir(entry.name))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .forEach((entry) => walk(path.join(currentDir, entry.name)));
+  }
+
+  walk(root);
+
+  const usedIds = new Set();
+  return projects.map((dir) => {
+    const relDir = toPosixRelative(root, dir);
+    const displayName = relDir || path.basename(dir) || dir;
+    return {
+      id: createInstanceId(displayName, usedIds),
+      name: displayName,
+      relDir,
+      dir,
+    };
+  });
 }
 
 function getOpenCodeRoot() {
@@ -128,7 +207,9 @@ function broadcast(event, data) {
 
 function getInstanceSummary(inst) {
   return {
+    id: inst.id,
     name: inst.name,
+    relDir: inst.relDir,
     dir: inst.dir,
     port: globalServer.port,
     pid: globalServer.pid || null,
@@ -347,12 +428,12 @@ function subscribeToOpenCodeEvents() {
 }
 
 function handleSessionIdle(sessionId) {
-  for (const [name, inst] of instances) {
+  for (const [id, inst] of instances) {
     if (inst.sessionId === sessionId && inst.status === 'auditing') {
-      console.log(`[SSE-OC] session.idle received for ${name} (${sessionId})`);
+      console.log(`[SSE-OC] session.idle received for ${inst.name} (${sessionId})`);
       inst.status = 'completed';
       broadcast('instance.update', getInstanceSummary(inst));
-      onAuditFinished(name);
+      onAuditFinished(id);
       return;
     }
   }
@@ -360,11 +441,11 @@ function handleSessionIdle(sessionId) {
 
 // ─── Virtual Process Manager ─────────────────────────────────────────────────
 
-async function startInstance(name) {
-  const inst = instances.get(name);
-  if (!inst) return { error: `Instance ${name} not found` };
+async function startInstance(id) {
+  const inst = instances.get(id);
+  if (!inst) return { error: `Instance ${id} not found` };
   if (inst.status !== 'stopped' && inst.status !== 'error' && inst.status !== 'completed') {
-    return { error: `Instance ${name} is already ${inst.status}` };
+    return { error: `Instance ${inst.name} is already ${inst.status}` };
   }
 
   inst.status = 'starting';
@@ -382,7 +463,7 @@ async function startInstance(name) {
   try {
     const sessionRes = await ocFetch(globalServer.port, '/session', {
       method: 'POST',
-      body: { title: `Audit: ${name}` },
+      body: { title: `Audit: ${inst.name}` },
     });
 
     if (!sessionRes.data || !sessionRes.data.id) {
@@ -402,9 +483,9 @@ async function startInstance(name) {
   }
 }
 
-async function stopInstance(name) {
-  const inst = instances.get(name);
-  if (!inst) return { error: `Instance ${name} not found` };
+async function stopInstance(id) {
+  const inst = instances.get(id);
+  if (!inst) return { error: `Instance ${id} not found` };
   if (inst.status === 'stopped') return { ok: true };
 
   inst.status = 'stopped';
@@ -423,8 +504,8 @@ async function stopInstance(name) {
 
 // ─── Audit Engine ────────────────────────────────────────────────────────────
 
-async function runAuditForInstance(name) {
-  const inst = instances.get(name);
+async function runAuditForInstance(id) {
+  const inst = instances.get(id);
   if (!inst || inst.status !== 'ready') return;
 
   try {
@@ -441,44 +522,44 @@ async function runAuditForInstance(name) {
       body: promptBody,
     });
 
-    pollAuditCompletion(name, inst.sessionId);
+    pollAuditCompletion(id, inst.sessionId);
   } catch (err) {
     inst.status = 'error';
     inst.error = err.message;
     broadcast('instance.update', getInstanceSummary(inst));
-    onAuditFinished(name);
+    onAuditFinished(id);
   }
 }
 
 // pollAuditCompletion is now just a safety-net timeout.
 // Real completion detection is handled by SSE session.idle events.
-function pollAuditCompletion(name, sessionId) {
-  const inst = instances.get(name);
+function pollAuditCompletion(id, sessionId) {
+  const inst = instances.get(id);
   if (!inst) return;
 
   // Safety timeout: if SSE somehow misses the event, force complete after 30 min
   setTimeout(() => {
     if (inst.status === 'auditing') {
-      console.log(`[TIMEOUT] Force-completing ${name} after 30min timeout`);
+      console.log(`[TIMEOUT] Force-completing ${inst.name} after 30min timeout`);
       inst.status = 'completed';
       broadcast('instance.update', getInstanceSummary(inst));
-      onAuditFinished(name);
+      onAuditFinished(id);
     }
   }, 30 * 60 * 1000);
 }
 
-function onAuditFinished(name) {
+function onAuditFinished(id) {
   activeAudits--;
   processAuditQueue();
 }
 
 function processAuditQueue() {
   while (auditQueue.length > 0 && activeAudits < CONFIG.maxConcurrent) {
-    const name = auditQueue.shift();
-    const inst = instances.get(name);
+    const id = auditQueue.shift();
+    const inst = instances.get(id);
     if (inst && inst.status === 'ready') {
       activeAudits++;
-      runAuditForInstance(name);
+      runAuditForInstance(id);
     }
   }
   broadcast('audit.queue', {
@@ -537,7 +618,7 @@ app.get('/api/config', (req, res) => {
   res.json(CONFIG);
 });
 
-// Scan project root for subdirectories
+// Scan project root recursively for Git repositories
 app.post('/api/scan', (req, res) => {
   const root = cleanPath(req.body.projectRoot) || CONFIG.projectRoot;
   const previousServerIdentity = getServerIdentity();
@@ -552,19 +633,19 @@ app.post('/api/scan', (req, res) => {
     stopGlobalServer();
   }
 
-  const dirs = fs.readdirSync(root, { withFileTypes: true })
-    .filter((d) => d.isDirectory() && !d.name.startsWith('.'))
-    .map((d) => d.name);
+  const projects = discoverGitProjects(root);
 
-  for (const [name, inst] of instances) {
-    stopInstance(name);
+  for (const [id] of instances) {
+    stopInstance(id);
   }
   instances.clear();
 
-  dirs.forEach((name) => {
-    instances.set(name, {
-      name,
-      dir: path.join(root, name),
+  projects.forEach((project) => {
+    instances.set(project.id, {
+      id: project.id,
+      name: project.name,
+      relDir: project.relDir,
+      dir: project.dir,
       status: 'stopped',
       sessionId: null,
       error: null,
@@ -573,8 +654,13 @@ app.post('/api/scan', (req, res) => {
     });
   });
 
-  broadcast('instances.reset', dirs.map((n) => getInstanceSummary(instances.get(n))));
-  res.json({ ok: true, services: dirs });
+  const summaries = projects.map((project) => getInstanceSummary(instances.get(project.id)));
+  broadcast('instances.reset', summaries);
+  res.json({
+    ok: true,
+    services: summaries.map((project) => project.name),
+    projects: summaries,
+  });
 });
 
 // Get available models dynamically from OpenCode global server
@@ -616,7 +702,7 @@ app.get('/api/models', async (req, res) => {
 app.post('/api/global-model', (req, res) => {
   const { model } = req.body;
   CONFIG.model = model || '';
-  for (const [name, inst] of instances) {
+  for (const [, inst] of instances) {
     inst.model = CONFIG.model;
     broadcast('instance.update', getInstanceSummary(inst));
   }
@@ -624,9 +710,9 @@ app.post('/api/global-model', (req, res) => {
 });
 
 // Update instance specific model
-app.post('/api/instances/:name/model', (req, res) => {
+app.post('/api/instances/:id/model', (req, res) => {
   const { model } = req.body;
-  const inst = instances.get(req.params.name);
+  const inst = instances.get(req.params.id);
   if (!inst) return res.status(404).json({ error: 'Not found' });
   inst.model = model || '';
   broadcast('instance.update', getInstanceSummary(inst));
@@ -643,8 +729,8 @@ app.get('/api/instances', (req, res) => {
 });
 
 // Get single instance
-app.get('/api/instances/:name', (req, res) => {
-  const inst = instances.get(req.params.name);
+app.get('/api/instances/:id', (req, res) => {
+  const inst = instances.get(req.params.id);
   if (!inst) return res.status(404).json({ error: 'Not found' });
   res.json(getInstanceSummary(inst));
 });
@@ -652,8 +738,8 @@ app.get('/api/instances/:name', (req, res) => {
 // Start all instances
 app.post('/api/instances/start-all', async (req, res) => {
   const results = {};
-  for (const [name] of instances) {
-    results[name] = await startInstance(name);
+  for (const [id] of instances) {
+    results[id] = await startInstance(id);
   }
   res.json(results);
 });
@@ -661,20 +747,20 @@ app.post('/api/instances/start-all', async (req, res) => {
 // Stop all instances
 app.post('/api/instances/stop-all', async (req, res) => {
   const results = {};
-  for (const [name] of instances) {
-    results[name] = await stopInstance(name);
+  for (const [id] of instances) {
+    results[id] = await stopInstance(id);
   }
   res.json(results);
 });
 
 // Start single instance
-app.post('/api/instances/:name/start', async (req, res) => {
-  res.json(await startInstance(req.params.name));
+app.post('/api/instances/:id/start', async (req, res) => {
+  res.json(await startInstance(req.params.id));
 });
 
 // Stop single instance
-app.post('/api/instances/:name/stop', async (req, res) => {
-  res.json(await stopInstance(req.params.name));
+app.post('/api/instances/:id/stop', async (req, res) => {
+  res.json(await stopInstance(req.params.id));
 });
 
 // ─── Audit Routes ────────────────────────────────────────────────────────────
@@ -689,20 +775,20 @@ app.post('/api/audit/start', async (req, res) => {
   activeAudits = 0;
   const needStart = [];
 
-  for (const [name, inst] of instances) {
+  for (const [id, inst] of instances) {
     if (inst.status === 'ready') {
-      auditQueue.push(name);
+      auditQueue.push(id);
     } else if (inst.status === 'stopped' || inst.status === 'error' || inst.status === 'completed') {
-      needStart.push(name);
+      needStart.push(id);
     }
   }
 
   // Pre-start the global server so we don't start it multiple times simultaneously in poor locking
   await startGlobalServer();
 
-  for (const name of needStart) {
-    await startInstance(name);
-    auditQueue.push(name);
+  for (const id of needStart) {
+    await startInstance(id);
+    auditQueue.push(id);
   }
 
   processAuditQueue();
@@ -715,8 +801,8 @@ app.post('/api/audit/start', async (req, res) => {
 });
 
 // Start single audit
-app.post('/api/audit/:name/start', async (req, res) => {
-  const inst = instances.get(req.params.name);
+app.post('/api/audit/:id/start', async (req, res) => {
+  const inst = instances.get(req.params.id);
   if (!inst) return res.status(404).json({ error: 'Not found' });
   if (!CONFIG.auditPrompt) return res.status(400).json({ error: 'Audit prompt not set' });
 
@@ -725,13 +811,13 @@ app.post('/api/audit/:name/start', async (req, res) => {
   }
 
   activeAudits++;
-  await runAuditForInstance(req.params.name);
+  await runAuditForInstance(req.params.id);
   res.json({ ok: true });
 });
 
 // Abort audit
-app.post('/api/audit/:name/abort', async (req, res) => {
-  const inst = instances.get(req.params.name);
+app.post('/api/audit/:id/abort', async (req, res) => {
+  const inst = instances.get(req.params.id);
   if (!inst) return res.status(404).json({ error: 'Not found' });
   if (!inst.sessionId) return res.status(400).json({ error: 'No active session' });
 
@@ -747,7 +833,7 @@ app.post('/api/audit/:name/abort', async (req, res) => {
 
 // ─── Proxy Routes (interact with specific opencode instance) ────────────────
 
-app.get('/api/instances/:name/sessions', async (req, res) => {
+app.get('/api/instances/:id/sessions', async (req, res) => {
   if (globalServer.status !== 'ready') return res.status(502).json({ error: 'Global server offline' });
   try {
     const r = await ocFetch(globalServer.port, '/session');
@@ -757,7 +843,7 @@ app.get('/api/instances/:name/sessions', async (req, res) => {
   }
 });
 
-app.get('/api/instances/:name/messages/:sessionId', async (req, res) => {
+app.get('/api/instances/:id/messages/:sessionId', async (req, res) => {
   if (globalServer.status !== 'ready') return res.status(502).json({ error: 'Global server offline' });
   try {
     const r = await ocFetch(globalServer.port, `/session/${req.params.sessionId}/message`);
@@ -767,7 +853,7 @@ app.get('/api/instances/:name/messages/:sessionId', async (req, res) => {
   }
 });
 
-app.post('/api/instances/:name/message/:sessionId', async (req, res) => {
+app.post('/api/instances/:id/message/:sessionId', async (req, res) => {
   if (globalServer.status !== 'ready') return res.status(502).json({ error: 'Global server offline' });
   try {
     const r = await ocFetch(globalServer.port, `/session/${req.params.sessionId}/message`, {
@@ -780,8 +866,8 @@ app.post('/api/instances/:name/message/:sessionId', async (req, res) => {
   }
 });
 
-app.post('/api/instances/:name/prompt/:sessionId', async (req, res) => {
-  const inst = instances.get(req.params.name);
+app.post('/api/instances/:id/prompt/:sessionId', async (req, res) => {
+  const inst = instances.get(req.params.id);
   if (!inst) return res.status(404).json({ error: 'Not found' });
   if (globalServer.status !== 'ready') return res.status(502).json({ error: 'Global server offline' });
   try {
@@ -794,7 +880,7 @@ app.post('/api/instances/:name/prompt/:sessionId', async (req, res) => {
     if (inst.status !== 'auditing') {
       inst.status = 'auditing';
       broadcast('instance.update', getInstanceSummary(inst));
-      pollAuditCompletion(inst.name, req.params.sessionId);
+      pollAuditCompletion(inst.id, req.params.sessionId);
     }
     
     res.json({ ok: true });
@@ -803,7 +889,7 @@ app.post('/api/instances/:name/prompt/:sessionId', async (req, res) => {
   }
 });
 
-app.get('/api/instances/:name/session-status', async (req, res) => {
+app.get('/api/instances/:id/session-status', async (req, res) => {
   if (globalServer.status !== 'ready') return res.status(502).json({ error: 'Global server offline' });
   try {
     const r = await ocFetch(globalServer.port, '/session/status');
@@ -813,7 +899,7 @@ app.get('/api/instances/:name/session-status', async (req, res) => {
   }
 });
 
-app.post('/api/instances/:name/abort/:sessionId', async (req, res) => {
+app.post('/api/instances/:id/abort/:sessionId', async (req, res) => {
   if (globalServer.status !== 'ready') return res.status(502).json({ error: 'Global server offline' });
   try {
     const r = await ocFetch(globalServer.port, `/session/${req.params.sessionId}/abort`, { method: 'POST' });
@@ -823,8 +909,8 @@ app.post('/api/instances/:name/abort/:sessionId', async (req, res) => {
   }
 });
 
-app.post('/api/instances/:name/session', async (req, res) => {
-  const inst = instances.get(req.params.name);
+app.post('/api/instances/:id/session', async (req, res) => {
+  const inst = instances.get(req.params.id);
   if (!inst) return res.status(404).json({ error: 'Not found' });
   if (globalServer.status !== 'ready') return res.status(502).json({ error: 'Global server offline' });
   

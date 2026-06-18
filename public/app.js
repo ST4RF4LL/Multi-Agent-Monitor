@@ -37,6 +37,20 @@ const App = (() => {
 
   function $(id) { return document.getElementById(id); }
 
+  function instanceKey(inst) {
+    return inst?.id || inst?.name || '';
+  }
+
+  function instanceApiPath(instOrId, suffix = '') {
+    const id = typeof instOrId === 'string' ? instOrId : instanceKey(instOrId);
+    return `/api/instances/${encodeURIComponent(id)}${suffix}`;
+  }
+
+  function instanceCardId(instOrId) {
+    const id = typeof instOrId === 'string' ? instOrId : instanceKey(instOrId);
+    return `card-${id}`;
+  }
+
   function toast(message, type = 'info') {
     const el = document.createElement('div');
     el.className = `toast toast-${type}`;
@@ -100,7 +114,7 @@ const App = (() => {
       updateInstanceInList(data);
       renderStats();
       // If this is the selected instance, update chat header
-        if (selectedInstance && selectedInstance.name === data.name) {
+        if (selectedInstance && instanceKey(selectedInstance) === instanceKey(data)) {
           selectedInstance = data;
           updateChatHeader();
           
@@ -110,19 +124,19 @@ const App = (() => {
           }
           
           if (data.status === 'auditing') {
-            instanceAutoRefresh.set(data.name, true);
+            instanceAutoRefresh.set(instanceKey(data), true);
           }
 
           // Auto-disable refresh when completed or errored
           if (data.status === 'completed' || data.status === 'error') {
-            instanceAutoRefresh.set(data.name, false);
+            instanceAutoRefresh.set(instanceKey(data), false);
             refreshMessages();
           }
 
           // Sync the UI toggle if this is the currently viewed instance
           const toggle = $('toggle-auto-refresh');
           if (toggle) {
-            toggle.checked = !!instanceAutoRefresh.get(data.name);
+            toggle.checked = !!instanceAutoRefresh.get(instanceKey(data));
           }
         }
     });
@@ -156,19 +170,20 @@ const App = (() => {
   // ─── Instance Management ─────────────────────────────────────────────
 
   function updateInstanceInList(data) {
-    const idx = instances.findIndex(i => i.name === data.name);
+    const key = instanceKey(data);
+    const idx = instances.findIndex(i => instanceKey(i) === key);
     if (idx >= 0) {
       instances[idx] = { ...instances[idx], ...data };
     } else {
       instances.push(data);
     }
-    renderInstanceCard(data.name);
+    renderInstanceCard(key);
   }
 
   function renderInstanceList() {
     const container = $('instance-list');
     container.innerHTML = '';
-    $('instance-count').textContent = `${instances.length} 个服务`;
+    $('instance-count').textContent = `${instances.length} 个项目`;
 
     for (const inst of instances) {
       const card = createInstanceCard(inst);
@@ -177,11 +192,13 @@ const App = (() => {
   }
 
   function createInstanceCard(inst) {
+    const key = instanceKey(inst);
     const card = document.createElement('div');
-    card.className = 'instance-card' + (selectedInstance?.name === inst.name ? ' selected' : '');
-    card.id = `card-${inst.name}`;
+    card.className = 'instance-card' + (instanceKey(selectedInstance) === key ? ' selected' : '');
+    card.id = instanceCardId(key);
+    card.dataset.instanceId = key;
     card.dataset.status = inst.status;
-    card.onclick = () => selectInstance(inst.name);
+    card.onclick = () => selectInstance(key);
 
     const statusLabels = {
       stopped: '已停止',
@@ -195,7 +212,7 @@ const App = (() => {
     card.innerHTML = `
       <div class="instance-icon">📦</div>
       <div class="instance-info">
-        <div class="instance-name">${escapeHtml(inst.name)}</div>
+        <div class="instance-name" title="${escapeHtml(inst.dir || inst.name)}">${escapeHtml(inst.name)}</div>
         <div class="instance-detail">
           ${inst.sessionId ? `<a href="${getSessionUrl(inst.sessionId, inst.port)}" target="_blank" class="session-link" onclick="event.stopPropagation()">🔗 ID: ${inst.sessionId.slice(-8)}</a>` : `<span>未建会话</span>`}
           ${inst.error ? `<span style="color:var(--accent-red)" title="${escapeHtml(inst.error)}">⚠</span>` : ''}
@@ -210,10 +227,10 @@ const App = (() => {
     return card;
   }
 
-  function renderInstanceCard(name) {
-    const inst = instances.find(i => i.name === name);
+  function renderInstanceCard(key) {
+    const inst = instances.find(i => instanceKey(i) === key);
     if (!inst) return;
-    const old = $(`card-${name}`);
+    const old = $(instanceCardId(key));
     if (old) {
       const card = createInstanceCard(inst);
       old.replaceWith(card);
@@ -268,8 +285,8 @@ const App = (() => {
 
   // ─── Instance Selection & Chat ───────────────────────────────────────
 
-  async function selectInstance(name) {
-    const inst = instances.find(i => i.name === name);
+  async function selectInstance(key) {
+    const inst = instances.find(i => instanceKey(i) === key);
     if (!inst) return;
 
     selectedInstance = inst;
@@ -278,7 +295,7 @@ const App = (() => {
 
     // Update selected card visuals
     document.querySelectorAll('.instance-card').forEach(c => c.classList.remove('selected'));
-    const card = $(`card-${name}`);
+    const card = $(instanceCardId(key));
     if (card) card.classList.add('selected');
 
     // Show chat panel
@@ -295,7 +312,7 @@ const App = (() => {
     // Restore per-instance auto-refresh toggle state
     const toggle = $('toggle-auto-refresh');
     if (toggle) {
-      toggle.checked = !!instanceAutoRefresh.get(name);
+      toggle.checked = !!instanceAutoRefresh.get(key);
     }
 
     // Load messages if session exists
@@ -338,7 +355,7 @@ const App = (() => {
     }
 
     try {
-      const data = await api(`/api/instances/${selectedInstance.name}/messages/${currentSessionId}`);
+      const data = await api(instanceApiPath(selectedInstance, `/messages/${currentSessionId}`));
       if (Array.isArray(data)) {
         messages = data;
       }
@@ -428,7 +445,7 @@ const App = (() => {
       if (!selectedInstance) return;
       
       // Check per-instance auto-refresh state
-      if (!instanceAutoRefresh.get(selectedInstance.name)) return;
+      if (!instanceAutoRefresh.get(instanceKey(selectedInstance))) return;
       
       if (currentSessionId) {
         await refreshMessages();
@@ -447,7 +464,7 @@ const App = (() => {
     if (!text || !selectedInstance) return;
 
     // Enable auto-refresh for this specific instance
-    instanceAutoRefresh.set(selectedInstance.name, true);
+    instanceAutoRefresh.set(instanceKey(selectedInstance), true);
     const toggle = $('toggle-auto-refresh');
     if (toggle) toggle.checked = true;
 
@@ -458,7 +475,7 @@ const App = (() => {
         return;
       }
       try {
-        const session = await api(`/api/instances/${selectedInstance.name}/session`, {
+        const session = await api(instanceApiPath(selectedInstance, '/session'), {
           method: 'POST',
           body: { title: `Interactive: ${selectedInstance.name}` },
         });
@@ -481,7 +498,7 @@ const App = (() => {
 
     try {
       // Send async prompt
-      await api(`/api/instances/${selectedInstance.name}/prompt/${currentSessionId}`, {
+      await api(instanceApiPath(selectedInstance, `/prompt/${currentSessionId}`), {
         method: 'POST',
         body: {
           model: selectedInstance.model || undefined,
@@ -492,7 +509,7 @@ const App = (() => {
       // Update instance status to indicate activity
       if (selectedInstance.status === 'ready' || selectedInstance.status === 'completed') {
         selectedInstance.status = 'auditing';
-        renderInstanceCard(selectedInstance.name);
+        renderInstanceCard(instanceKey(selectedInstance));
         updateChatHeader();
       }
 
@@ -519,7 +536,7 @@ const App = (() => {
   async function abortCurrentSession() {
     if (!selectedInstance || !currentSessionId) return;
     try {
-      await api(`/api/instances/${selectedInstance.name}/abort/${currentSessionId}`, {
+      await api(instanceApiPath(selectedInstance, `/abort/${currentSessionId}`), {
         method: 'POST',
       });
       toast('已发送中止请求', 'info');
@@ -532,8 +549,8 @@ const App = (() => {
     if (!selectedInstance) return;
     try {
       toast('正在重启实例...', 'info');
-      await api(`/api/instances/${selectedInstance.name}/stop`, { method: 'POST' });
-      await api(`/api/instances/${selectedInstance.name}/start`, { method: 'POST' });
+      await api(instanceApiPath(selectedInstance, '/stop'), { method: 'POST' });
+      await api(instanceApiPath(selectedInstance, '/start'), { method: 'POST' });
       toast('✅ 实例已重启并就绪', 'success');
       currentSessionId = null;
       messages = [];
@@ -589,14 +606,14 @@ const App = (() => {
       });
 
       if (!result.services || result.services.length === 0) {
-        toast('未找到子目录', 'error');
+        toast('未找到 Git 仓库项目', 'error');
         btn.disabled = false;
         btn.innerHTML = '🚀 扫描并启动';
         return;
       }
 
       totalInstances = result.services.length;
-      toast(`发现 ${result.services.length} 个微服务`, 'success');
+      toast(`发现 ${result.services.length} 个 Git 项目`, 'success');
 
       // Switch to monitor screen
       $('setup-screen').style.display = 'none';
@@ -694,7 +711,8 @@ const App = (() => {
 
           // Update selected instance if it changed
           if (selectedInstance) {
-            const updated = instances.find(i => i.name === selectedInstance.name);
+            const selectedKey = instanceKey(selectedInstance);
+            const updated = instances.find(i => instanceKey(i) === selectedKey);
             if (updated) {
               const statusChanged = selectedInstance.status !== updated.status;
               const sessionChanged = selectedInstance.sessionId !== updated.sessionId;
@@ -793,7 +811,7 @@ const App = (() => {
   async function setInstanceModel(model) {
     if (!selectedInstance) return;
     try {
-      await api(`/api/instances/${selectedInstance.name}/model`, { method: 'POST', body: { model } });
+      await api(instanceApiPath(selectedInstance, '/model'), { method: 'POST', body: { model } });
       toast(`✅ 已为 ${selectedInstance.name} 分配独立模型`, 'success');
     } catch (err) {
       toast('实例模型修改失败: ' + err.message, 'error');
@@ -802,7 +820,7 @@ const App = (() => {
 
   function toggleAutoRefresh(checked) {
     if (!selectedInstance) return;
-    instanceAutoRefresh.set(selectedInstance.name, checked);
+    instanceAutoRefresh.set(instanceKey(selectedInstance), checked);
   }
 
   // ─── Public API ──────────────────────────────────────────────────────
