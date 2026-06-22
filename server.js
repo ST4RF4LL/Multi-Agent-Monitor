@@ -196,7 +196,7 @@ async function sendPromptToTerminal(id, promptText) {
   let initialized = false;
   for (let i = 0; i < 20; i++) {
     try {
-      const pane = await tmux.capturePane(sessionId);
+      const pane = await tmux.capturePanePlain(sessionId);
       if (pane.includes('Build') || pane.includes('Plan') || pane.includes('\u23FA')) {
         initialized = true;
         break;
@@ -206,14 +206,10 @@ async function sendPromptToTerminal(id, promptText) {
   }
   if (!initialized) console.warn(`[AUDIT] opencode may not be ready for ${id}, sending anyway...`);
 
-  // Send text line by line with -R (reset terminal) for reliability
-  const lines = promptText.split('\n');
-  for (const line of lines) {
-    if (line.length > 0) {
-      await tmux.exec(['send-keys', '-R', '-t', target, '-l', line]);
-    }
-    await tmux.sendEnter(sessionId);
-  }
+  // Send entire prompt at once: \n→\r for Enter in raw terminal mode
+  const text = promptText.replace(/\n/g, '\r');
+  await tmux.exec(['send-keys', '-R', '-t', target, '-l', text]);
+  await tmux.sendEnter(sessionId);
 }
 
 async function runAuditForInstance(id) {
@@ -304,7 +300,8 @@ app.get('/api/instances/:id/terminal', async (req, res) => {
     const sessionId = tmux.sessionName(req.params.id);
     const exists = await tmux.hasSession(sessionId);
     if (!exists) return res.json({ text: '', status: inst.status });
-    const text = await tmux.capturePane(sessionId);
+    // -e not used: plain text without ANSI escape codes
+    const text = await tmux.capturePanePlain(sessionId);
     res.json({ text, status: inst.status });
   } catch {
     res.json({ text: '', status: inst.status });
