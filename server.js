@@ -224,15 +224,21 @@ async function startInstance(id) {
     inst.sessionId = latestSession.id;
     console.log(`[SESSION:${inst.name}] Using TUI session: ${inst.sessionId}`);
 
-    // Force TUI redraw so the session interface is rendered
+    // Recreate tmux with --session flag so TUI opens directly to the conversation view
     try {
       const sid = tmux.sessionName(inst.id);
-      const target = tmux.windowTarget(sid);
-      await tmux.sendKeys(sid, 'Escape');
-      await new Promise(r => setTimeout(r, 100));
-      await tmux.exec(['send-keys', '-R', '-t', target, '-l', '']);
-      await tmux.sendKeys(sid, 'C-l');
-    } catch {}
+      await tmux.killSession(sid);
+      await new Promise(r => setTimeout(r, 1500)); // wait for port to release
+      await tmux.createSessionWithEnv(inst.id,
+        `opencode --port ${inst.ocPort} --hostname 127.0.0.1 --session ${inst.sessionId}`,
+        inst.dir, env, { cols: 160, rows: 40 });
+      console.log(`[TMUX] mam-${inst.id} recreated with --session ${inst.sessionId}`);
+      // Wait for TUI server to be ready again
+      inst.ocReady = false;
+      await ensureServeReady(inst);
+    } catch (e) {
+      console.warn(`[TMUX] Session restart failed: ${e.message}`);
+    }
 
     inst.status = 'ready';
     inst.startedAt = new Date().toISOString();
@@ -285,16 +291,6 @@ async function runAuditForInstance(id) {
       method: 'POST',
       body: promptBody,
     });
-
-    // Force TUI in tmux to redraw so the session conversation is visible
-    try {
-      const sid = tmux.sessionName(id);
-      const target = tmux.windowTarget(sid);
-      await tmux.sendKeys(sid, 'Escape');
-      await new Promise(r => setTimeout(r, 100));
-      await tmux.exec(['send-keys', '-R', '-t', target, '-l', '']);
-      await tmux.sendKeys(sid, 'C-l');
-    } catch {}
 
     scheduleAuditTimeout(id);
   } catch (err) {
