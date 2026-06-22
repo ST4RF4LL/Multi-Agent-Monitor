@@ -3,6 +3,8 @@ const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
+const tmux = require('./lib/tmux-manager');
+const createTerminalWSServer = require('./lib/terminal-ws');
 
 const app = express();
 app.use(express.json());
@@ -348,7 +350,7 @@ async function startInstance(id) {
   }
 
   try {
-    // Create a session on the global opencode server
+    // Create session on the global opencode serve
     const sessionRes = await ocFetch(globalServer.port, '/session', {
       method: 'POST',
       body: { title: inst.name, parentID: undefined },
@@ -359,6 +361,20 @@ async function startInstance(id) {
     }
 
     inst.sessionId = sessionRes.data.id;
+
+    // Also create tmux session running opencode TUI for human-in-the-loop access
+    const openCodeRoot = getOpenCodeRoot();
+    const env = { ...process.env };
+    if (openCodeRoot && openCodeRoot !== inst.dir) {
+      env.OPENCODE_ROOT = openCodeRoot;
+    }
+    try {
+      await tmux.createSessionWithEnv(inst.id, 'opencode', inst.dir, env, { cols: 160, rows: 40 });
+      console.log(`[TMUX] Session mam-${inst.id} created for ${inst.name}`);
+    } catch (terr) {
+      console.warn(`[TMUX] Failed to create tmux session for ${inst.name}: ${terr.message}`);
+    }
+
     inst.status = 'ready';
     inst.startedAt = new Date().toISOString();
     broadcast('instance.update', getInstanceSummary(inst));
@@ -381,6 +397,9 @@ async function stopInstance(id) {
       await ocFetch(globalServer.port, `/session/${inst.sessionId}/abort`, { method: 'POST' });
     } catch {}
   }
+
+  // Kill tmux session
+  try { await tmux.killSession(tmux.sessionName(id)); } catch {}
 
   inst.sessionId = null;
   inst.status = 'stopped';
@@ -497,6 +516,11 @@ app.post('/api/config', (req, res) => {
 });
 
 app.get('/api/config', (req, res) => res.json(CONFIG));
+
+// Terminal popup — serves terminal.html with tmux xterm.js
+app.get('/terminal/:id', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'terminal.html'));
+});
 
 app.post('/api/scan', (req, res) => {
   const root = cleanPath(req.body.projectRoot) || CONFIG.projectRoot;
@@ -741,6 +765,14 @@ app.get('/api/audit/status', (req, res) => {
 
 async function shutdown() {
   console.log('\n[SYSTEM] Shutting down...');
+  // Kill tmux sessions
+  for (const [id] of instances) {
+    try { await tmux.killSession(tmux.sessionName(id)); } catch {}
+  }
+  try {
+    const sessions = await tmux.listSessions();
+    for (const s of sessions) await tmux.killSession(s);
+  } catch {}
   await stopGlobalServer();
   process.exit(0);
 }
@@ -750,13 +782,20 @@ process.on('SIGTERM', shutdown);
 
 // ─── Startup ─────────────────────────────────────────────────────────────────
 
+const { execSync } = require('child_process');
+let tmuxAvailable = false;
+try { execSync('tmux -V', { stdio: 'ignore' }); tmuxAvailable = true; } catch {}
+
 const server = http.createServer(app);
+createTerminalWSServer(server);
 
 const PORT = CONFIG.backendPort;
 server.listen(PORT, () => {
   console.log(`\n  ╔══════════════════════════════════════════════════╗`);
-  console.log(`  ║   Multi-Agent Monitor (opencode serve)           ║`);
+  console.log(`  ║   Multi-Agent Monitor (opencode serve + tmux)  ║`);
   console.log(`  ║   http://localhost:${PORT}                          ║`);
-  console.log(`  ║   OpenCode serve port: ${CONFIG.ocPort}                       ║`);
+  console.log(`  ║   OpenCode serve: :${CONFIG.ocPort}                        ║`);
+  console.log(`  ║   tmux attach: tmux attach -t mam-<instance>   ║`);
+  console.log(`  ║   tmux: ${tmuxAvailable ? '✓' : '✗ NOT FOUND (popup terminal & tmux attach disabled)'}   ║`);
   console.log(`  ╚══════════════════════════════════════════════════╝\n`);
 });

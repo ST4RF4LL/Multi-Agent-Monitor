@@ -100,8 +100,9 @@ const App = (() => {
       <div class="instance-icon">📦</div>
       <div class="instance-info">
         <div class="instance-name" title="${escapeHtml(inst.dir||inst.name)}">${escapeHtml(inst.name)}</div>
-        <div class="instance-detail">${inst.error ? `<span style="color:var(--accent-red)" title="${escapeHtml(inst.error)}">⚠ ${escapeHtml(inst.error.substring(0,40))}</span>` : '<span>session 模式</span>'}</div>
+        <div class="instance-detail">${inst.error ? `<span style="color:var(--accent-red)" title="${escapeHtml(inst.error)}">⚠ ${escapeHtml(inst.error.substring(0,40))}</span>` : '<span>session + tmux</span>'}</div>
       </div>
+      <button class="btn-terminal-popup" title="弹出独立终端窗口" onclick="event.stopPropagation();App.openTerminalPopup('${escapeHtml(key)}')">🖥</button>
       <div class="instance-status-badge" data-status="${inst.status}">
         ${inst.status==='auditing'?'<span class="spinner spinner-sm"></span>':''}${labels[inst.status]||inst.status}
       </div>`;
@@ -287,6 +288,14 @@ const App = (() => {
   async function setGlobalModel(model) { try { await api('/api/global-model',{method:'POST',body:{model}}); toast('✅ 全局模型已更新','success'); } catch(e) { toast('失败','error'); } }
   async function setInstanceModel(model) { if (!selectedInstance) return; try { await api(instPath(selectedInstance,'/model'),{method:'POST',body:{model}}); toast('✅ 实例模型已更新','success'); } catch(e) { toast('失败','error'); } }
 
+  // ─── Popup Terminal ─────────────────────────────────────────────────
+
+  function openTerminalPopup(key) {
+    const w = 1100, h = 700;
+    window.open('/terminal/'+encodeURIComponent(key), 'term-'+key,
+      `width=${w},height=${h},left=${Math.max(0,(screen.width-w)/2)},top=${Math.max(0,(screen.height-h)/2)}`);
+  }
+
   // ─── Settings ────────────────────────────────────────────────────────
 
   function toggleSettings() {
@@ -345,5 +354,5 @@ const App = (() => {
     } catch {}
   });
 
-  return { launch, backToSetup, startBatchAudit, pauseAudit, resumeAudit, stopAllInstances, sendMessage, onChatKeyDown, abortAudit, selectInstance, setGlobalModel, setInstanceModel, toggleSettings, saveSettings };
+  return { launch, backToSetup, startBatchAudit, pauseAudit, resumeAudit, stopAllInstances, sendMessage, onChatKeyDown, abortAudit, selectInstance, setGlobalModel, setInstanceModel, openTerminalPopup, toggleSettings, saveSettings };
 })();
