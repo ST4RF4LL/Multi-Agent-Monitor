@@ -122,11 +122,23 @@ const App = (() => {
 
   function updateQueue(data) {
     const bar = $('queue-bar');
+    const pauseBtn = $('btn-pause');
+    const resumeBtn = $('btn-resume');
     const done = instances.filter(i => i.status==='completed').length;
     const total = totalInstances||instances.length;
-    if (data.active===0 && data.queued===0) { bar.classList.add('hidden'); return; }
+    if (data.active===0 && data.queued===0 && !data.paused) { bar.classList.add('hidden'); pauseBtn.classList.add('hidden'); resumeBtn.classList.add('hidden'); return; }
     bar.classList.remove('hidden');
-    $('queue-text').textContent = `并发: ${data.active}/${data.max} | 队列: ${data.queued}`;
+
+    // Toggle pause/resume buttons
+    if (data.paused) {
+      pauseBtn.classList.add('hidden');
+      resumeBtn.classList.remove('hidden');
+    } else {
+      pauseBtn.classList.remove('hidden');
+      resumeBtn.classList.add('hidden');
+    }
+
+    $('queue-text').textContent = `${data.paused ? '⏸ 已暂停 | ' : ''}并发: ${data.active}/${data.max} | 队列: ${data.queued}`;
     $('queue-fill').style.width = total>0 ? `${Math.round(done/total*100)}%` : '0%';
     $('queue-percent').textContent = `${done}/${total} 完成`;
   }
@@ -223,13 +235,20 @@ const App = (() => {
 
   // ─── Batch ──────────────────────────────────────────────────────────
 
-  async function startAllInstances() { try { await api('/api/instances/start-all',{method:'POST'}); toast('启动中...'); } catch(err) { toast('失败: '+err.message,'error'); } }
   async function stopAllInstances() { try { await api('/api/instances/stop-all',{method:'POST'}); toast('停止中...'); } catch(err) { toast('失败: '+err.message,'error'); } }
   async function startBatchAudit() {
     $('btn-start-audit').disabled=true;
     try { const r = await api('/api/audit/start',{method:'POST'}); toast(`批量审计已启动，${r.queued} 个在队列中`,'success'); }
     catch(err) { toast('失败: '+err.message,'error'); }
     setTimeout(() => { $('btn-start-audit').disabled=false; }, 2000);
+  }
+  async function pauseAudit() {
+    try { await api('/api/audit/pause',{method:'POST'}); toast('队列已暂停','info'); }
+    catch(err) { toast('暂停失败: '+err.message,'error'); }
+  }
+  async function resumeAudit() {
+    try { await api('/api/audit/resume',{method:'POST'}); toast('队列已恢复','success'); }
+    catch(err) { toast('恢复失败: '+err.message,'error'); }
   }
 
   function startRefresh() {
@@ -243,6 +262,37 @@ const App = (() => {
 
   async function setGlobalModel(model) { try { await api('/api/global-model',{method:'POST',body:{model}}); toast('✅ 全局模型已更新','success'); } catch(e) { toast('失败','error'); } }
   async function setInstanceModel(model) { if (!selectedInstance) return; try { await api(instPath(selectedInstance,'/model'),{method:'POST',body:{model}}); toast('✅ 实例模型已更新','success'); } catch(e) { toast('失败','error'); } }
+
+  // ─── Settings ────────────────────────────────────────────────────────
+
+  function toggleSettings() {
+    const overlay = $('settings-overlay');
+    if (overlay.classList.contains('hidden')) {
+      // Populate current values
+      api('/api/config').then(cfg => {
+        $('settings-audit-prompt').value = cfg.auditPrompt || '';
+        $('settings-max-concurrent').value = cfg.maxConcurrent || 3;
+        $('settings-model').value = cfg.model || '';
+      }).catch(() => {});
+      overlay.classList.remove('hidden');
+    } else {
+      overlay.classList.add('hidden');
+    }
+  }
+
+  async function saveSettings() {
+    const auditPrompt = $('settings-audit-prompt').value.trim();
+    const maxConcurrent = parseInt($('settings-max-concurrent').value) || 3;
+    const model = $('settings-model').value.trim();
+    try {
+      await api('/api/config', { method: 'POST', body: { auditPrompt, maxConcurrent, model } });
+      if (model) await api('/api/global-model', { method: 'POST', body: { model } });
+      toast('设置已保存', 'success');
+      $('settings-overlay').classList.add('hidden');
+    } catch (err) {
+      toast('保存失败: ' + err.message, 'error');
+    }
+  }
 
   // ─── Init ───────────────────────────────────────────────────────────
 
@@ -258,6 +308,7 @@ const App = (() => {
         const list = $('model-list'); if (list) list.innerHTML = models.map(m => `<option value="${escapeHtml(m.value)}" label="${escapeHtml(m.label)}"></option>`).join('');
         const gs = $('global-model-select'); if (gs) gs.innerHTML = `<option value="">-- 系统默认 --</option>` + opts;
         const is = $('instance-model-select'); if (is) is.innerHTML = `<option value="">系统默认</option>` + opts;
+        const ms = $('model-list-settings'); if (ms) ms.innerHTML = models.map(m => `<option value="${escapeHtml(m.value)}" label="${escapeHtml(m.label)}"></option>`).join('');
       }
     } catch {}
     try {
@@ -271,5 +322,5 @@ const App = (() => {
     } catch {}
   });
 
-  return { launch, backToSetup, startBatchAudit, startAllInstances, stopAllInstances, sendMessage, onChatKeyDown, abortAudit, selectInstance, setGlobalModel, setInstanceModel, openTerminalPopup };
+  return { launch, backToSetup, startBatchAudit, pauseAudit, resumeAudit, stopAllInstances, sendMessage, onChatKeyDown, abortAudit, selectInstance, setGlobalModel, setInstanceModel, openTerminalPopup, toggleSettings, saveSettings };
 })();

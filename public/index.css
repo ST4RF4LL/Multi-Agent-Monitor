@@ -36,6 +36,7 @@
   --accent-green: #34d399;
   --accent-red: #f87171;
   --accent-orange: #fb923c;
+  --accent-amber: #f59e0b;
 
   /* Gradients */
   --gradient-hero: linear-gradient(135deg, #0ea5e9 0%, #8b5cf6 50%, #06b6d4 100%);
@@ -275,6 +276,27 @@ html, body {
 
 .btn-danger:hover {
   background: rgba(239, 68, 68, 0.25);
+}
+
+.btn-pause {
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--accent-amber);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.btn-pause:hover {
+  background: rgba(245, 158, 11, 0.25);
+}
+
+.btn-resume {
+  background: var(--gradient-audit);
+  color: white;
+  box-shadow: 0 2px 8px rgba(16, 185, 129, 0.3);
+}
+
+.btn-resume:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(16, 185, 129, 0.4);
 }
 
 .btn-sm {
@@ -1056,4 +1078,77 @@ html, body {
     border-right: none;
     border-bottom: 1px solid var(--border-subtle);
   }
+}
+
+/* ─── Settings Overlay ──────────────────────────────────────────────────── */
+
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.settings-overlay.hidden {
+  display: none;
+}
+
+.settings-panel {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  padding: 1.5rem;
+  width: min(480px, 90vw);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1.25rem;
+}
+
+.settings-header h3 {
+  margin: 0;
+  font-size: 1rem;
+  color: var(--text-primary);
+}
+
+.settings-body .form-group {
+  margin-bottom: 1rem;
+}
+
+.settings-body .form-group label {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  margin-bottom: 0.35rem;
+}
+
+.settings-body textarea,
+.settings-body input {
+  width: 100%;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  padding: 0.5rem 0.75rem;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  resize: vertical;
+}
+
+.settings-body textarea:focus,
+.settings-body input:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+}
+
+.settings-body .btn-full {
+  margin-top: 0.5rem;
 }

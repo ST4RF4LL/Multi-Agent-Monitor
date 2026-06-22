@@ -64,9 +64,10 @@
               <option value="">-- 全局模型 --</option>
             </select>
             <button class="btn btn-audit btn-sm" id="btn-start-audit" onclick="App.startBatchAudit()">▶ 批量审计</button>
-            <button class="btn btn-ghost btn-sm" onclick="App.startAllInstances()">启动全部</button>
+            <button class="btn btn-pause btn-sm hidden" id="btn-pause" onclick="App.pauseAudit()">⏸ 暂停</button>
+            <button class="btn btn-resume btn-sm hidden" id="btn-resume" onclick="App.resumeAudit()">▶ 继续</button>
             <button class="btn btn-ghost btn-sm" onclick="App.stopAllInstances()">停止全部</button>
-            <button class="btn btn-ghost btn-sm" onclick="App.backToSetup()">⚙ 设置</button>
+            <button class="btn btn-ghost btn-sm" onclick="App.toggleSettings()">⚙ 设置</button>
           </div>
         </div>
 
@@ -74,6 +75,34 @@
           <span id="queue-text">队列: 0/0</span>
           <div class="queue-progress-track"><div class="queue-progress-fill" id="queue-fill" style="width:0%"></div></div>
           <span id="queue-percent">0%</span>
+        </div>
+
+        <!-- Settings overlay -->
+        <div class="settings-overlay hidden" id="settings-overlay">
+          <div class="settings-panel">
+            <div class="settings-header">
+              <h3>⚙ 设置</h3>
+              <button class="btn btn-ghost btn-sm" onclick="App.toggleSettings()">✕ 关闭</button>
+            </div>
+            <div class="settings-body">
+              <div class="form-group">
+                <label>📝 审计 Prompt</label>
+                <textarea id="settings-audit-prompt" rows="4" spellcheck="false"></textarea>
+              </div>
+              <div class="form-row" style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;">
+                <div class="form-group">
+                  <label>⚡ 最大并发数</label>
+                  <input type="number" id="settings-max-concurrent" value="3" min="1" max="20" />
+                </div>
+                <div class="form-group">
+                  <label>🤖 全局模型</label>
+                  <input type="text" id="settings-model" list="model-list-settings" placeholder="留空使用默认" />
+                  <datalist id="model-list-settings"></datalist>
+                </div>
+              </div>
+              <button class="btn btn-primary btn-sm btn-full" onclick="App.saveSettings()">💾 保存设置</button>
+            </div>
+          </div>
         </div>
 
         <div class="main-layout">

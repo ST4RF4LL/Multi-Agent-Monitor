@@ -125,6 +125,9 @@ Create a `config.json` (see `config.example.json`):
 | POST | `/api/instances/:id/send` | Send text to instance terminal |
 | POST | `/api/instances/:id/abort` | Abort instance (send Ctrl+C) |
 | POST | `/api/audit/start` | Start batch audit |
+| POST | `/api/audit/pause` | Pause audit queue |
+| POST | `/api/audit/resume` | Resume audit queue |
+| GET | `/api/audit/status` | Get queue status (queued/active/paused) |
 | POST | `/api/audit/:id/start` | Start single instance audit |
 | POST | `/api/audit/:id/abort` | Abort single audit |
 | WS | `/terminals/ws?id=<instanceId>` | WebSocket terminal stream |

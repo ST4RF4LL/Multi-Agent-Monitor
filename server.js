@@ -25,6 +25,7 @@ const sseClients = new Set();
 
 let auditQueue = [];
 let activeAudits = 0;
+let auditPaused = false;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -242,6 +243,10 @@ function onAuditFinished(id) {
 }
 
 function processAuditQueue() {
+  if (auditPaused) {
+    broadcast('audit.queue', { queued: auditQueue.length, active: activeAudits, max: CONFIG.maxConcurrent, paused: true });
+    return;
+  }
   while (auditQueue.length > 0 && activeAudits < CONFIG.maxConcurrent) {
     const id = auditQueue.shift();
     const inst = instances.get(id);
@@ -250,7 +255,7 @@ function processAuditQueue() {
       runQueuedAudit(id);
     }
   }
-  broadcast('audit.queue', { queued: auditQueue.length, active: activeAudits, max: CONFIG.maxConcurrent });
+  broadcast('audit.queue', { queued: auditQueue.length, active: activeAudits, max: CONFIG.maxConcurrent, paused: false });
 }
 
 function isAuditCandidate(status) {
@@ -378,12 +383,6 @@ app.get('/api/instances/:id', (req, res) => {
   res.json(getInstanceSummary(inst));
 });
 
-app.post('/api/instances/start-all', async (req, res) => {
-  const results = {};
-  for (const [id] of instances) results[id] = await startInstance(id);
-  res.json(results);
-});
-
 app.post('/api/instances/stop-all', async (req, res) => {
   const results = {};
   for (const [id] of instances) results[id] = await stopInstance(id);
@@ -421,6 +420,7 @@ app.post('/api/audit/start', async (req, res) => {
   if (!CONFIG.auditPrompt) return res.status(400).json({ error: 'Audit prompt not set' });
   auditQueue = [];
   activeAudits = 0;
+  auditPaused = false;
   for (const [id, inst] of instances) {
     if (isAuditCandidate(inst.status)) auditQueue.push(id);
   }
@@ -449,6 +449,26 @@ app.post('/api/audit/:id/abort', async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ─── Pause / Resume ──────────────────────────────────────────────────────────
+
+app.post('/api/audit/pause', (req, res) => {
+  auditPaused = true;
+  broadcast('audit.queue', { queued: auditQueue.length, active: activeAudits, max: CONFIG.maxConcurrent, paused: true });
+  console.log('[AUDIT] Queue paused');
+  res.json({ ok: true, paused: true });
+});
+
+app.post('/api/audit/resume', (req, res) => {
+  auditPaused = false;
+  processAuditQueue();
+  console.log('[AUDIT] Queue resumed');
+  res.json({ ok: true, paused: false });
+});
+
+app.get('/api/audit/status', (req, res) => {
+  res.json({ queued: auditQueue.length, active: activeAudits, max: CONFIG.maxConcurrent, paused: auditPaused });
 });
 
 // Shortcut for abort from frontend
