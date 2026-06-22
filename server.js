@@ -190,15 +190,27 @@ async function stopInstance(id) {
 
 async function sendPromptToTerminal(id, promptText) {
   const sessionId = tmux.sessionName(id);
-  // Check session exists
-  const exists = await tmux.hasSession(sessionId).catch(() => false);
-  if (!exists) throw new Error(`Tmux session ${sessionId} not found`);
+  const target = tmux.windowTarget(sessionId);
 
-  // Send text line-by-line to avoid paste-buffer issues in WSL
+  // Wait for opencode TUI to fully initialize (up to 10 seconds)
+  let initialized = false;
+  for (let i = 0; i < 20; i++) {
+    try {
+      const pane = await tmux.capturePane(sessionId);
+      if (pane.includes('Build') || pane.includes('Plan') || pane.includes('\u23FA')) {
+        initialized = true;
+        break;
+      }
+    } catch {}
+    await new Promise(r => setTimeout(r, 500));
+  }
+  if (!initialized) console.warn(`[AUDIT] opencode may not be ready for ${id}, sending anyway...`);
+
+  // Send text line by line with -R (reset terminal) for reliability
   const lines = promptText.split('\n');
   for (const line of lines) {
     if (line.length > 0) {
-      await tmux.sendKeysLiteral(sessionId, line);
+      await tmux.exec(['send-keys', '-R', '-t', target, '-l', line]);
     }
     await tmux.sendEnter(sessionId);
   }
