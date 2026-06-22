@@ -190,19 +190,18 @@ async function stopInstance(id) {
 
 async function sendPromptToTerminal(id, promptText) {
   const sessionId = tmux.sessionName(id);
-  const target = tmux.windowTarget(sessionId);
-  // Load prompt into tmux paste buffer, then paste into target pane
-  await new Promise((resolve, reject) => {
-    const proc = require('child_process').spawn('tmux', ['load-buffer', '-'], {
-      stdio: ['pipe', 'ignore', 'pipe'],
-    });
-    proc.on('error', reject);
-    proc.on('close', code => code === 0 ? resolve() : reject(new Error(`load-buffer exit ${code}`)));
-    proc.stdin.write(promptText);
-    proc.stdin.end();
-  });
-  await tmux.exec(['paste-buffer', '-t', target]);
-  await tmux.sendEnter(sessionId);
+  // Check session exists
+  const exists = await tmux.hasSession(sessionId).catch(() => false);
+  if (!exists) throw new Error(`Tmux session ${sessionId} not found`);
+
+  // Send text line-by-line to avoid paste-buffer issues in WSL
+  const lines = promptText.split('\n');
+  for (const line of lines) {
+    if (line.length > 0) {
+      await tmux.sendKeysLiteral(sessionId, line);
+    }
+    await tmux.sendEnter(sessionId);
+  }
 }
 
 async function runAuditForInstance(id) {
