@@ -302,6 +302,26 @@ html, body {
   box-shadow: 0 4px 16px rgba(16, 185, 129, 0.4);
 }
 
+.btn-refresh-on {
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--accent-green);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.btn-refresh-on:hover {
+  background: rgba(16, 185, 129, 0.25);
+}
+
+.btn-refresh-off {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--accent-red);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.btn-refresh-off:hover {
+  background: rgba(239, 68, 68, 0.25);
+}
+
 .btn-sm {
   padding: 0.4rem 0.8rem;
   font-size: 0.75rem;

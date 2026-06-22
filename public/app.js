@@ -11,6 +11,7 @@ const App = (() => {
   let seenMsgIds = new Set();
   let totalInstances = 0;
   let currentModel = '';
+  let autoRefresh = true;
 
   const API = '';
 
@@ -288,6 +289,23 @@ const App = (() => {
   async function setGlobalModel(model) { try { await api('/api/global-model',{method:'POST',body:{model}}); toast('✅ 全局模型已更新','success'); } catch(e) { toast('失败','error'); } }
   async function setInstanceModel(model) { if (!selectedInstance) return; try { await api(instPath(selectedInstance,'/model'),{method:'POST',body:{model}}); toast('✅ 实例模型已更新','success'); } catch(e) { toast('失败','error'); } }
 
+  // ─── Auto Refresh ───────────────────────────────────────────────────
+
+  function toggleAutoRefresh() {
+    autoRefresh = !autoRefresh;
+    const btn = $('btn-auto-refresh');
+    if (autoRefresh) {
+      btn.textContent = '⟳ 自动刷新: 开';
+      btn.className = 'btn btn-refresh-on btn-sm';
+      startRefresh(); startMsgPoll();
+    } else {
+      btn.textContent = '⟳ 自动刷新: 关';
+      btn.className = 'btn btn-refresh-off btn-sm';
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+      stopMsgPoll();
+    }
+  }
+
   // ─── Popup Terminal ─────────────────────────────────────────────────
 
   function openTerminalPopup(key) {
@@ -354,5 +372,5 @@ const App = (() => {
     } catch {}
   });
 
-  return { launch, backToSetup, startBatchAudit, pauseAudit, resumeAudit, stopAllInstances, sendMessage, onChatKeyDown, abortAudit, selectInstance, setGlobalModel, setInstanceModel, openTerminalPopup, toggleSettings, saveSettings };
+  return { launch, backToSetup, startBatchAudit, pauseAudit, resumeAudit, stopAllInstances, sendMessage, onChatKeyDown, abortAudit, selectInstance, setGlobalModel, setInstanceModel, openTerminalPopup, toggleSettings, saveSettings, toggleAutoRefresh };
 })();
