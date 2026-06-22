@@ -213,11 +213,14 @@ async function startInstance(id) {
       body: { title: inst.name },
     });
 
+    console.log(`[SESSION:${inst.name}] POST /session response:`, JSON.stringify(sessionRes.data).slice(0,200));
+
     if (!sessionRes.data || !sessionRes.data.id) {
-      throw new Error('Failed to create session on instance server');
+      throw new Error(`Failed to create session: ${JSON.stringify(sessionRes.data)}`);
     }
 
     inst.sessionId = sessionRes.data.id;
+    console.log(`[SESSION:${inst.name}] sessionId set to: ${inst.sessionId}`);
     inst.status = 'ready';
     inst.startedAt = new Date().toISOString();
     broadcast('instance.update', getInstanceSummary(inst));
