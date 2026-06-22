@@ -210,30 +210,26 @@ async function startInstance(id) {
       throw new Error('OpenCode TUI server did not start in time');
     }
 
-    // Get the default session that the TUI started with
-    const sessionsRes = await ocFetch(inst.ocPort, '/session', { timeout: 10000 });
-    const sessions = sessionsRes.data || [];
-    if (!Array.isArray(sessions) || sessions.length === 0) {
-      throw new Error('No sessions found on TUI server');
+    // Create a fresh session explicitly (TUI may have resumed an old one)
+    const createRes = await ocFetch(inst.ocPort, '/session', {
+      method: 'POST',
+      body: { title: inst.name },
+    });
+    if (!createRes.data || !createRes.data.id) {
+      throw new Error('Failed to create fresh session');
     }
+    inst.sessionId = createRes.data.id;
+    console.log(`[SESSION:${inst.name}] Created new session: ${inst.sessionId}`);
 
-    // Use the most recent session (the one the TUI is showing)
-    const latestSession = sessions.reduce((a, b) =>
-      (a.time?.updated || 0) > (b.time?.updated || 0) ? a : b
-    );
-    inst.sessionId = latestSession.id;
-    console.log(`[SESSION:${inst.name}] Using TUI session: ${inst.sessionId}`);
-
-    // Recreate tmux with --session flag so TUI opens directly to the conversation view
+    // Restart tmux with --session so TUI opens directly to this fresh session
     try {
       const sid = tmux.sessionName(inst.id);
       await tmux.killSession(sid);
-      await new Promise(r => setTimeout(r, 1500)); // wait for port to release
+      await new Promise(r => setTimeout(r, 1500));
       await tmux.createSessionWithEnv(inst.id,
         `opencode --port ${inst.ocPort} --hostname 127.0.0.1 --session ${inst.sessionId}`,
         inst.dir, env, { cols: 160, rows: 40 });
       console.log(`[TMUX] mam-${inst.id} recreated with --session ${inst.sessionId}`);
-      // Wait for TUI server to be ready again
       inst.ocReady = false;
       await ensureServeReady(inst);
     } catch (e) {
