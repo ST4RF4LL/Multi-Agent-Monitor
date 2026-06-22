@@ -329,30 +329,45 @@ app.post('/api/scan', (req, res) => {
 });
 
 app.get('/api/models', async (req, res) => {
-  // Models are discovered from opencode config at openCodeRoot
+  // Read models from opencode.json config file
   try {
-    const { spawn } = require('child_process');
     const root = getOpenCodeRoot();
-    const proc = spawn('opencode', ['config', '--json'], { cwd: root, stdio: 'pipe', timeout: 10000 });
-    let out = '';
-    proc.stdout.on('data', d => out += d);
-    proc.on('close', code => {
-      if (code !== 0) return res.json({ models: [] });
+    const configPaths = [
+      path.join(root, 'opencode.json'),
+      path.join(root, 'opencode.jsonc'),
+    ];
+    let models = [];
+    for (const configPath of configPaths) {
+      if (!fs.existsSync(configPath)) continue;
       try {
-        const parsed = JSON.parse(out);
+        const raw = fs.readFileSync(configPath, 'utf8');
+        const parsed = JSON.parse(raw);
+        // Extract from provider definitions
         const providers = parsed.provider || {};
-        const models = [];
         for (const [pid, p] of Object.entries(providers)) {
-          if (p.models) {
+          if (!p || typeof p !== 'object') continue;
+          // If provider has explicitly listed models
+          if (p.models && typeof p.models === 'object') {
             for (const [mid, m] of Object.entries(p.models)) {
-              models.push({ value: `${pid}/${mid}`, label: `${pid} / ${m?.name || mid}`, providerID: pid, modelID: mid, name: m?.name || mid });
+              const name = (m && m.name) ? m.name : mid;
+              models.push({ value: `${pid}/${mid}`, label: `${pid} / ${name}`, providerID: pid, modelID: mid, name });
             }
+          } else {
+            // Provider has no model list — add the provider prefix for manual entry
+            models.push({ value: `${pid}/`, label: `${pid} / (手动输入)`, providerID: pid, modelID: '', name: pid });
           }
         }
-        res.json({ models });
-      } catch { res.json({ models: [] }); }
-    });
-    proc.on('error', () => res.json({ models: [] }));
+        // Also include the default model if set
+        if (parsed.model && typeof parsed.model === 'string') {
+          const existing = models.find(m => m.value === parsed.model);
+          if (!existing) {
+            models.push({ value: parsed.model, label: parsed.model, providerID: parsed.model.split('/')[0], modelID: parsed.model.split('/').slice(1).join('/'), name: parsed.model });
+          }
+        }
+      } catch { /* skip malformed config */ }
+      if (models.length > 0) break;
+    }
+    res.json({ models });
   } catch { res.json({ models: [] }); }
 });
 
