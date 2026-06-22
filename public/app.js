@@ -7,6 +7,8 @@ const App = (() => {
   let selectedInstance = null;
   let eventSource = null;
   let pollTimer = null;
+  let termTimer = null;
+  let lastTermLength = 0;
   let totalInstances = 0;
   let currentModel = '';
 
@@ -148,12 +150,15 @@ const App = (() => {
   function selectInstance(key) {
     const inst = instances.find(i => instanceKey(i) === key); if (!inst) return;
     selectedInstance = inst;
+    lastTermLength = 0;
     document.querySelectorAll('.instance-card').forEach(c => c.classList.remove('selected'));
     const card = $(cardId(key)); if (card) card.classList.add('selected');
     $('chat-empty').style.display = 'none';
     $('chat-content').style.display = 'flex';
+    $('chat-messages').innerHTML = '';
     updateHeader();
     const s = $('instance-model-select'); if (s) s.value = inst.model || '';
+    startTermPoll();
   }
 
   function updateHeader() {
@@ -185,7 +190,40 @@ const App = (() => {
     catch (err) { toast('中止失败: '+err.message, 'error'); }
   }
 
-  // ─── Popup Terminal ─────────────────────────────────────────────────
+  // ─── Terminal Poll ──────────────────────────────────────────────────
+
+  function startTermPoll() {
+    stopTermPoll();
+    pollTerminal();
+    termTimer = setInterval(pollTerminal, 2000);
+  }
+
+  function stopTermPoll() {
+    if (termTimer) { clearInterval(termTimer); termTimer = null; }
+  }
+
+  async function pollTerminal() {
+    if (!selectedInstance) return;
+    try {
+      const data = await api(instPath(selectedInstance, '/terminal'));
+      const text = data.text || '';
+      if (!text) return;
+      const msgs = $('chat-messages');
+      if (text.length < lastTermLength) {
+        // Pane was cleared or reset — show fresh
+        msgs.innerHTML = '';
+        lastTermLength = 0;
+      }
+      if (text.length <= lastTermLength) return;
+      const newText = text.slice(lastTermLength);
+      lastTermLength = text.length;
+      const div = document.createElement('div');
+      div.className = 'chat-line';
+      div.textContent = newText;
+      msgs.appendChild(div);
+      msgs.scrollTop = msgs.scrollHeight;
+    } catch {}
+  }
 
   function openTerminalPopup(key) {
     const w = 1100, h = 700;
@@ -220,6 +258,7 @@ const App = (() => {
   function backToSetup() {
     $('setup-screen').style.display='flex'; $('monitor-screen').style.display='none';
     if (eventSource) eventSource.close(); if (pollTimer) clearInterval(pollTimer);
+    stopTermPoll();
     selectedInstance = null;
   }
 

@@ -296,6 +296,21 @@ app.get('/terminal/:id', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'terminal.html'));
 });
 
+// Capture terminal pane content for chat display
+app.get('/api/instances/:id/terminal', async (req, res) => {
+  const inst = instances.get(req.params.id);
+  if (!inst) return res.status(404).json({ error: 'Not found' });
+  try {
+    const sessionId = tmux.sessionName(req.params.id);
+    const exists = await tmux.hasSession(sessionId);
+    if (!exists) return res.json({ text: '', status: inst.status });
+    const text = await tmux.capturePane(sessionId);
+    res.json({ text, status: inst.status });
+  } catch {
+    res.json({ text: '', status: inst.status });
+  }
+});
+
 // ─── API Routes ──────────────────────────────────────────────────────────────
 
 app.get('/api/events', (req, res) => {
@@ -340,12 +355,15 @@ app.post('/api/scan', (req, res) => {
 });
 
 app.get('/api/models', async (req, res) => {
-  // Read models from opencode.json config file
+  // Read models from opencode config files (project + global)
   try {
     const root = getOpenCodeRoot();
+    const home = process.env.HOME || process.env.USERPROFILE || '~';
     const configPaths = [
       path.join(root, 'opencode.json'),
       path.join(root, 'opencode.jsonc'),
+      path.join(home, '.config', 'opencode', 'opencode.json'),
+      path.join(home, '.config', 'opencode', 'opencode.jsonc'),
     ];
     let models = [];
     for (const configPath of configPaths) {
@@ -361,22 +379,26 @@ app.get('/api/models', async (req, res) => {
           if (p.models && typeof p.models === 'object') {
             for (const [mid, m] of Object.entries(p.models)) {
               const name = (m && m.name) ? m.name : mid;
-              models.push({ value: `${pid}/${mid}`, label: `${pid} / ${name}`, providerID: pid, modelID: mid, name });
+              const value = `${pid}/${mid}`;
+              if (!models.find(x => x.value === value)) {
+                models.push({ value, label: `${pid} / ${name}`, providerID: pid, modelID: mid, name });
+              }
             }
           } else {
-            // Provider has no model list — add the provider prefix for manual entry
-            models.push({ value: `${pid}/`, label: `${pid} / (手动输入)`, providerID: pid, modelID: '', name: pid });
+            // Provider configured but no model list — add prefix for manual entry
+            const value = `${pid}/`;
+            if (!models.find(x => x.value === value)) {
+              models.push({ value, label: `${pid} / (手动输入)`, providerID: pid, modelID: '', name: pid });
+            }
           }
         }
-        // Also include the default model if set
+        // Include the default model if set
         if (parsed.model && typeof parsed.model === 'string') {
-          const existing = models.find(m => m.value === parsed.model);
-          if (!existing) {
+          if (!models.find(m => m.value === parsed.model)) {
             models.push({ value: parsed.model, label: parsed.model, providerID: parsed.model.split('/')[0], modelID: parsed.model.split('/').slice(1).join('/'), name: parsed.model });
           }
         }
       } catch { /* skip malformed config */ }
-      if (models.length > 0) break;
     }
     res.json({ models });
   } catch { res.json({ models: [] }); }
