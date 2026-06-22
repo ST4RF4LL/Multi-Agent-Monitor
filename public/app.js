@@ -1,25 +1,16 @@
-// ═══════════════════════════════════════════════════════════════════════════
-// Multi-Agent Monitor — Frontend Application
-// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
+// Multi-Agent Monitor — Frontend (CLI-based, terminal via popup)
+// ═══════════════════════════════════════════════════════════════════════
 
 const App = (() => {
-  // ─── State ───────────────────────────────────────────────────────────
   let instances = [];
   let selectedInstance = null;
-  let currentSessionId = null;
-  let messages = [];
   let eventSource = null;
   let pollTimer = null;
-  let sessionPollTimer = null;
   let totalInstances = 0;
-  let currentOpenCodeRoot = '';
-  let currentProjectRoot = '';
   let currentModel = '';
-  const instanceAutoRefresh = new Map(); // per-instance auto-refresh state
 
   const API = '';
-
-  // ─── Helpers ─────────────────────────────────────────────────────────
 
   async function api(path, options = {}) {
     const res = await fetch(API + path, {
@@ -36,850 +27,249 @@ const App = (() => {
   }
 
   function $(id) { return document.getElementById(id); }
+  function instanceKey(inst) { return inst?.id || inst?.name || ''; }
+  function escapeHtml(str) { const d = document.createElement('div'); d.textContent = str; return d.innerHTML; }
+  function instPath(inst, s = '') { return `/api/instances/${encodeURIComponent(instanceKey(inst))}${s}`; }
+  function cardId(inst) { return `card-${instanceKey(inst)}`; }
 
-  function instanceKey(inst) {
-    return inst?.id || inst?.name || '';
+  function toast(msg, type = 'info') {
+    const el = document.createElement('div'); el.className = `toast toast-${type}`; el.textContent = msg;
+    $('toast-container').appendChild(el); setTimeout(() => el.remove(), 4000);
   }
 
-  function instanceApiPath(instOrId, suffix = '') {
-    const id = typeof instOrId === 'string' ? instOrId : instanceKey(instOrId);
-    return `/api/instances/${encodeURIComponent(id)}${suffix}`;
+  function normalizeModelOptions(models) {
+    if (!Array.isArray(models)) return [];
+    return models.map(m => {
+      if (typeof m === 'string') return { value: m, label: m };
+      const v = m.value || (m.providerID && m.modelID ? `${m.providerID}/${m.modelID}` : '');
+      return v ? { value: v, label: m.label || m.name || v } : null;
+    }).filter(Boolean);
   }
 
-  function sessionSuffix(route, sessionId) {
-    return `${route}/${encodeURIComponent(sessionId)}`;
-  }
-
-  function instanceCardId(instOrId) {
-    const id = typeof instOrId === 'string' ? instOrId : instanceKey(instOrId);
-    return `card-${id}`;
-  }
-
-  function toast(message, type = 'info') {
-    const el = document.createElement('div');
-    el.className = `toast toast-${type}`;
-    el.textContent = message;
-    $('toast-container').appendChild(el);
-    setTimeout(() => el.remove(), 4000);
-  }
-
-  function escapeHtml(str) {
-    const div = document.createElement('div');
-    div.textContent = str;
-    return div.innerHTML;
-  }
-
-  function normalizeMessages(payload) {
-    if (Array.isArray(payload)) return payload;
-    if (Array.isArray(payload?.messages)) return payload.messages;
-    if (Array.isArray(payload?.data)) return payload.data;
-    if (Array.isArray(payload?.items)) return payload.items;
-    if (payload?.data && typeof payload.data === 'object') return Object.values(payload.data);
-    if (payload && typeof payload === 'object') {
-      return Object.values(payload).filter((item) =>
-        item && typeof item === 'object' && (item.info || item.parts || item.role || item.content || item.text)
-      );
-    }
-    return [];
-  }
-
-  function normalizeMessageParts(msg) {
-    if (Array.isArray(msg.parts)) return msg.parts;
-    if (Array.isArray(msg.content)) return msg.content;
-    if (typeof msg.content === 'string') return [{ type: 'text', text: msg.content }];
-    if (typeof msg.text === 'string') return [{ type: 'text', text: msg.text }];
-    return [];
-  }
-
-  function formatText(text) {
-    if (!text) return '';
-    // Basic markdown-like formatting
-    let html = escapeHtml(text);
-    // Code blocks
-    html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
-      return `<pre><code>${code.trim()}</code></pre>`;
-    });
-    // Inline code
-    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-    // Bold
-    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-    // Newlines
-    html = html.replace(/\n/g, '<br>');
-    return html;
-  }
-
-  function getSessionUrl(sessionId, port = 4100) {
-    const rootForUrl = currentOpenCodeRoot || currentProjectRoot;
-    if (!sessionId || !rootForUrl) return '#';
-    try {
-      // Normalize Windows backslashes to forward slashes (OpenCode expects '/')
-      const normalizedRoot = rootForUrl.replace(/\\/g, '/');
-      // Base64Url encode the project root without padding
-      const b64 = btoa(unescape(encodeURIComponent(normalizedRoot)))
-                  .replace(/=+$/, '')
-                  .replace(/\+/g, '-')
-                  .replace(/\//g, '_');
-      return `http://127.0.0.1:${port}/${b64}/session/${encodeURIComponent(sessionId)}`;
-    } catch {
-      return `http://127.0.0.1:${port}/?session_id=${encodeURIComponent(sessionId)}`;
-    }
-  }
-
-  // ─── SSE Connection ──────────────────────────────────────────────────
+  // ─── SSE ────────────────────────────────────────────────────────────
 
   function connectSSE() {
     if (eventSource) eventSource.close();
     eventSource = new EventSource(API + '/api/events');
-
-    eventSource.addEventListener('connected', () => {
-      console.log('[SSE] Connected');
-    });
-
+    eventSource.addEventListener('connected', () => console.log('[SSE] Connected'));
     eventSource.addEventListener('instance.update', (e) => {
       const data = JSON.parse(e.data);
-      updateInstanceInList(data);
+      updateInList(data);
       renderStats();
-      // If this is the selected instance, update chat header
-        if (selectedInstance && instanceKey(selectedInstance) === instanceKey(data)) {
-          const previousSessionId = currentSessionId;
-          selectedInstance = data;
-
-          if (data.sessionId && currentSessionId !== data.sessionId) {
-            currentSessionId = data.sessionId;
-          } else if (!data.sessionId && currentSessionId) {
-            currentSessionId = null;
-            messages = [];
-            renderMessages();
-          }
-
-          updateChatHeader();
-          
-          const instSel = $('instance-model-select');
-          if (instSel && instSel.value !== (data.model || '')) {
-            instSel.value = data.model || '';
-          }
-          
-          if (data.status === 'auditing') {
-            instanceAutoRefresh.set(instanceKey(data), true);
-          }
-
-          // Auto-disable refresh when completed or errored
-          if (data.status === 'completed' || data.status === 'error') {
-            instanceAutoRefresh.set(instanceKey(data), false);
-            refreshMessages();
-          } else if (!previousSessionId && currentSessionId) {
-            refreshMessages();
-          }
-
-          // Sync the UI toggle if this is the currently viewed instance
-          const toggle = $('toggle-auto-refresh');
-          if (toggle) {
-            toggle.checked = !!instanceAutoRefresh.get(instanceKey(data));
-          }
-        }
-    });
-
-    eventSource.addEventListener('instances.reset', (e) => {
-      instances = JSON.parse(e.data);
-      totalInstances = instances.length;
-      renderInstanceList();
-      renderStats();
-    });
-
-    eventSource.addEventListener('audit.queue', (e) => {
-      const data = JSON.parse(e.data);
-      updateQueueBar(data);
-    });
-
-    eventSource.addEventListener('instance.log', (e) => {
-      const data = JSON.parse(e.data);
-      if (data.type === 'stderr') {
-        console.error(`[${data.name}]`, data.line);
-      } else {
-        console.log(`[${data.name}]`, data.line);
+      if (selectedInstance && instanceKey(selectedInstance) === instanceKey(data)) {
+        selectedInstance = data;
+        updateHeader();
       }
     });
-
-    eventSource.onerror = () => {
-      console.warn('[SSE] Connection lost, reconnecting...');
-    };
+    eventSource.addEventListener('instances.reset', (e) => {
+      instances = JSON.parse(e.data); totalInstances = instances.length;
+      renderList(); renderStats();
+    });
+    eventSource.addEventListener('audit.queue', (e) => updateQueue(JSON.parse(e.data)));
+    eventSource.onerror = () => console.warn('[SSE] Lost');
   }
 
-  // ─── Instance Management ─────────────────────────────────────────────
+  // ─── Instance List ──────────────────────────────────────────────────
 
-  function updateInstanceInList(data) {
-    const key = instanceKey(data);
-    const idx = instances.findIndex(i => instanceKey(i) === key);
-    if (idx >= 0) {
-      instances[idx] = { ...instances[idx], ...data };
-    } else {
-      instances.push(data);
-    }
-    renderInstanceCard(key);
+  function updateInList(data) {
+    const key = instanceKey(data); const idx = instances.findIndex(i => instanceKey(i) === key);
+    if (idx >= 0) instances[idx] = { ...instances[idx], ...data }; else instances.push(data);
+    renderCard(key);
   }
 
-  function renderInstanceList() {
-    const container = $('instance-list');
-    container.innerHTML = '';
+  function renderList() {
+    const c = $('instance-list'); c.innerHTML = '';
     $('instance-count').textContent = `${instances.length} 个项目`;
-
-    for (const inst of instances) {
-      const card = createInstanceCard(inst);
-      container.appendChild(card);
-    }
+    instances.forEach(i => c.appendChild(createCard(i)));
   }
 
-  function createInstanceCard(inst) {
+  function createCard(inst) {
     const key = instanceKey(inst);
     const card = document.createElement('div');
     card.className = 'instance-card' + (instanceKey(selectedInstance) === key ? ' selected' : '');
-    card.id = instanceCardId(key);
+    card.id = cardId(key);
     card.dataset.instanceId = key;
     card.dataset.status = inst.status;
     card.onclick = () => selectInstance(key);
 
-    const statusLabels = {
-      stopped: '已停止',
-      starting: '启动中',
-      ready: '就绪',
-      auditing: '审计中',
-      completed: '已完成',
-      error: '错误',
-    };
-
+    const labels = { stopped:'已停止',starting:'启动中',ready:'就绪',auditing:'审计中',completed:'已完成',error:'错误' };
     card.innerHTML = `
       <div class="instance-icon">📦</div>
       <div class="instance-info">
-        <div class="instance-name" title="${escapeHtml(inst.dir || inst.name)}">${escapeHtml(inst.name)}</div>
-        <div class="instance-detail">
-          ${inst.sessionId ? `<a href="${getSessionUrl(inst.sessionId, inst.port)}" target="_blank" class="session-link" onclick="event.stopPropagation()">🔗 ID: ${inst.sessionId.slice(-8)}</a>` : `<span>未建会话</span>`}
-          ${inst.error ? `<span style="color:var(--accent-red)" title="${escapeHtml(inst.error)}">⚠</span>` : ''}
-        </div>
+        <div class="instance-name" title="${escapeHtml(inst.dir||inst.name)}">${escapeHtml(inst.name)}</div>
+        <div class="instance-detail">${inst.error ? `<span style="color:var(--accent-red)" title="${escapeHtml(inst.error)}">⚠ ${escapeHtml(inst.error.substring(0,40))}</span>` : '<span>tmux 终端</span>'}</div>
       </div>
+      <button class="btn-terminal-popup" title="弹出独立终端窗口" onclick="event.stopPropagation();App.openTerminalPopup('${escapeHtml(key)}')">🖥</button>
       <div class="instance-status-badge" data-status="${inst.status}">
-        ${inst.status === 'auditing' ? '<span class="spinner spinner-sm"></span>' : ''}
-        ${statusLabels[inst.status] || inst.status}
-      </div>
-    `;
-
+        ${inst.status==='auditing'?'<span class="spinner spinner-sm"></span>':''}${labels[inst.status]||inst.status}
+      </div>`;
     return card;
   }
 
-  function renderInstanceCard(key) {
-    const inst = instances.find(i => instanceKey(i) === key);
-    if (!inst) return;
-    const old = $(instanceCardId(key));
-    if (old) {
-      const card = createInstanceCard(inst);
-      old.replaceWith(card);
-    }
+  function renderCard(key) {
+    const inst = instances.find(i => instanceKey(i) === key); if (!inst) return;
+    const old = $(cardId(key)); if (old) old.replaceWith(createCard(inst));
   }
 
   function renderStats() {
-    const counts = { stopped: 0, starting: 0, ready: 0, auditing: 0, completed: 0, error: 0 };
-    for (const inst of instances) {
-      counts[inst.status] = (counts[inst.status] || 0) + 1;
-    }
-
-    const stats = $('toolbar-stats');
-    stats.innerHTML = '';
-
-    const items = [
-      { key: 'auditing', label: '审计中', cls: 'dot-auditing' },
-      { key: 'completed', label: '完成', cls: 'dot-completed' },
-      { key: 'ready', label: '就绪', cls: 'dot-ready' },
-      { key: 'error', label: '错误', cls: 'dot-error' },
-      { key: 'stopped', label: '停止', cls: 'dot-stopped' },
-    ];
-
-    for (const item of items) {
-      if (counts[item.key] > 0) {
-        const badge = document.createElement('div');
-        badge.className = 'stat-badge';
-        badge.innerHTML = `<span class="dot ${item.cls}"></span>${counts[item.key]} ${item.label}`;
-        stats.appendChild(badge);
-      }
-    }
+    const counts = {};
+    instances.forEach(i => counts[i.status] = (counts[i.status]||0)+1);
+    const s = $('toolbar-stats'); s.innerHTML = '';
+    [{key:'auditing',label:'审计中',cls:'dot-auditing'},{key:'completed',label:'完成',cls:'dot-completed'},
+     {key:'ready',label:'就绪',cls:'dot-ready'},{key:'error',label:'错误',cls:'dot-error'},{key:'stopped',label:'停止',cls:'dot-stopped'}]
+      .forEach(item => { if (counts[item.key]>0) { const b = document.createElement('div'); b.className='stat-badge'; b.innerHTML=`<span class="dot ${item.cls}"></span>${counts[item.key]} ${item.label}`; s.appendChild(b); } });
   }
 
-  function updateQueueBar(data) {
+  function updateQueue(data) {
     const bar = $('queue-bar');
-    const completed = instances.filter(i => i.status === 'completed').length;
-    const total = totalInstances || instances.length;
-    const active = data.active;
-    const queued = data.queued;
-
-    if (active === 0 && queued === 0) {
-      bar.classList.add('hidden');
-      return;
-    }
-
+    const done = instances.filter(i => i.status==='completed').length;
+    const total = totalInstances||instances.length;
+    if (data.active===0 && data.queued===0) { bar.classList.add('hidden'); return; }
     bar.classList.remove('hidden');
-    const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
-    $('queue-text').textContent = `并发: ${active}/${data.max} | 队列: ${queued}`;
-    $('queue-fill').style.width = `${pct}%`;
-    $('queue-percent').textContent = `${completed}/${total} 完成`;
+    $('queue-text').textContent = `并发: ${data.active}/${data.max} | 队列: ${data.queued}`;
+    $('queue-fill').style.width = total>0 ? `${Math.round(done/total*100)}%` : '0%';
+    $('queue-percent').textContent = `${done}/${total} 完成`;
   }
 
-  // ─── Instance Selection & Chat ───────────────────────────────────────
+  // ─── Selection ──────────────────────────────────────────────────────
 
-  async function selectInstance(key) {
-    const inst = instances.find(i => instanceKey(i) === key);
-    if (!inst) return;
-
+  function selectInstance(key) {
+    const inst = instances.find(i => instanceKey(i) === key); if (!inst) return;
     selectedInstance = inst;
-    currentSessionId = inst.sessionId;
-    messages = [];
-
-    // Update selected card visuals
     document.querySelectorAll('.instance-card').forEach(c => c.classList.remove('selected'));
-    const card = $(instanceCardId(key));
-    if (card) card.classList.add('selected');
-
-    // Show chat panel
+    const card = $(cardId(key)); if (card) card.classList.add('selected');
     $('chat-empty').style.display = 'none';
     $('chat-content').style.display = 'flex';
-    updateChatHeader();
-    
-    // Update instance model selector
-    const instSel = $('instance-model-select');
-    if (instSel) {
-      instSel.value = selectedInstance.model || '';
-    }
-
-    // Restore per-instance auto-refresh toggle state
-    const toggle = $('toggle-auto-refresh');
-    if (toggle) {
-      toggle.checked = !!instanceAutoRefresh.get(key);
-    }
-
-    // Load messages if session exists
-    if (currentSessionId) {
-      await refreshMessages();
-    } else {
-      renderMessages();
-    }
-
-    // Start session status polling for this instance
-    startSessionPoll();
+    updateHeader();
+    const s = $('instance-model-select'); if (s) s.value = inst.model || '';
   }
 
-  function updateChatHeader() {
+  function updateHeader() {
     if (!selectedInstance) return;
-    const statusLabels = {
-      stopped: '⏹ 已停止',
-      starting: '⏳ 启动中...',
-      ready: '✅ 就绪',
-      auditing: '🔍 审计中...',
-      completed: '✅ 审计完成',
-      error: '❌ 错误',
-    };
-    
-    $('chat-instance-name').textContent = selectedInstance.name;
-    const stLabel = statusLabels[selectedInstance.status] || selectedInstance.status;
-    
-    $('chat-instance-status').innerHTML =
-      `<span>${stLabel}</span> | ` +
-      (currentSessionId 
-        ? `<a href="${getSessionUrl(currentSessionId, selectedInstance.port)}" target="_blank" style="color: var(--accent-blue); text-decoration: none;">🔗 WebUI</a>` 
-        : `<span>未建会话</span>`);
+    const labels = { stopped:'⏹ 已停止',starting:'⏳ 启动中...',ready:'✅ 就绪',auditing:'🔍 审计中...',completed:'✅ 完成',error:'❌ 错误' };
+    $('instance-name-display').textContent = selectedInstance.name;
+    $('instance-status-display').textContent = labels[selectedInstance.status] || selectedInstance.status;
   }
 
-  async function refreshMessages() {
-    if (!selectedInstance || !currentSessionId) {
-      messages = [];
-      renderMessages();
-      return;
-    }
-
-    try {
-      const data = await api(instanceApiPath(selectedInstance, sessionSuffix('/messages', currentSessionId)));
-      messages = normalizeMessages(data);
-      renderMessages();
-    } catch (err) {
-      console.error('Failed to load messages:', err);
-    }
-  }
-
-  function renderMessages() {
-    const container = $('chat-messages');
-    container.innerHTML = '';
-
-    if (messages.length === 0) {
-      if (selectedInstance?.status === 'stopped' || selectedInstance?.status === 'ready') {
-        container.innerHTML = `
-          <div style="text-align:center;color:var(--text-muted);padding:2rem;">
-            <p>暂无消息。${selectedInstance?.status === 'ready' ? '可以在下方输入消息开始交互。' : ''}</p>
-          </div>`;
-      }
-      return;
-    }
-
-    for (const msg of messages) {
-      const info = msg.info || {};
-      const parts = normalizeMessageParts(msg);
-      const role = info.role || msg.role || 'assistant';
-
-      const msgEl = document.createElement('div');
-      msgEl.className = `message ${role}`;
-
-      let contentHtml = '';
-
-      for (const part of parts) {
-        if (part.type === 'text') {
-          contentHtml += formatText(part.text || part.content || '');
-        } else if (part.type === 'tool-invocation' || part.type === 'tool_use') {
-          const toolName = part.toolName || part.name || 'tool';
-          contentHtml += `<div class="message-tool">
-            <span class="tool-name">🔧 ${escapeHtml(toolName)}</span>
-          </div>`;
-        } else if (part.type === 'tool-result' || part.type === 'tool_result') {
-          // Show tool results more compactly
-          const resultText = typeof part.result === 'string' ? part.result :
-            (part.content ? (typeof part.content === 'string' ? part.content : JSON.stringify(part.content)) : '');
-          if (resultText) {
-            contentHtml += `<div class="message-tool">
-              <span class="tool-name">📋 结果</span><br>
-              <pre><code>${escapeHtml(resultText.substring(0, 500))}${resultText.length > 500 ? '...' : ''}</code></pre>
-            </div>`;
-          }
-        }
-      }
-
-      if (!contentHtml.trim()) {
-        // If no renderable content, skip
-        continue;
-      }
-
-      msgEl.innerHTML = `
-        <div class="message-role">${role === 'user' ? '👤 用户' : '🤖 助手'}</div>
-        <div class="message-bubble">${contentHtml}</div>
-      `;
-
-      container.appendChild(msgEl);
-    }
-
-    // Show typing indicator if auditing
-    if (selectedInstance?.status === 'auditing') {
-      const typing = document.createElement('div');
-      typing.className = 'message assistant';
-      typing.innerHTML = `
-        <div class="message-role">🤖 助手</div>
-        <div class="message-bubble">
-          <div class="typing-indicator"><span></span><span></span><span></span></div>
-        </div>`;
-      container.appendChild(typing);
-    }
-
-    // Scroll to bottom
-    container.scrollTop = container.scrollHeight;
-  }
-
-  function startSessionPoll() {
-    if (sessionPollTimer) clearInterval(sessionPollTimer);
-    sessionPollTimer = setInterval(async () => {
-      if (!selectedInstance) return;
-      
-      // Check per-instance auto-refresh state
-      if (!instanceAutoRefresh.get(instanceKey(selectedInstance))) return;
-      
-      if (currentSessionId) {
-        await refreshMessages();
-      } else if (selectedInstance.sessionId) {
-        currentSessionId = selectedInstance.sessionId;
-        await refreshMessages();
-      }
-    }, 2000); // Polling every 2 seconds for snappier chat
-  }
-
-  // ─── Chat Interaction ────────────────────────────────────────────────
+  // ─── Chat ───────────────────────────────────────────────────────────
 
   async function sendMessage() {
-    const input = $('chat-input');
-    const text = input.value.trim();
+    const input = $('chat-input'); const text = input.value.trim();
     if (!text || !selectedInstance) return;
-
-    // Enable auto-refresh for this specific instance
-    instanceAutoRefresh.set(instanceKey(selectedInstance), true);
-    const toggle = $('toggle-auto-refresh');
-    if (toggle) toggle.checked = true;
-
-    // If no session, create one first
-    if (!currentSessionId) {
-      if (selectedInstance.status !== 'ready') {
-        toast('实例未就绪，无法发送消息', 'error');
-        return;
-      }
-      try {
-        const session = await api(instanceApiPath(selectedInstance, '/session'), {
-          method: 'POST',
-          body: { title: `Interactive: ${selectedInstance.name}` },
-        });
-        currentSessionId = session.id;
-      } catch (err) {
-        toast('创建会话失败: ' + err.message, 'error');
-        return;
-      }
-    }
-
-    input.value = '';
-    autoResizeInput();
-
-    // Optimistic UI: show user message immediately
-    messages.push({
-      info: { role: 'user' },
-      parts: [{ type: 'text', text }],
-    });
-    renderMessages();
-
+    if (selectedInstance.status !== 'ready' && selectedInstance.status !== 'auditing') { toast('实例未就绪', 'error'); return; }
+    input.value = ''; autoResize();
     try {
-      // Send async prompt
-      await api(instanceApiPath(selectedInstance, sessionSuffix('/prompt', currentSessionId)), {
-        method: 'POST',
-        body: {
-          model: selectedInstance.model || undefined,
-          parts: [{ type: 'text', text }],
-        },
-      });
-
-      // Update instance status to indicate activity
-      if (selectedInstance.status === 'ready' || selectedInstance.status === 'completed') {
-        selectedInstance.status = 'auditing';
-        renderInstanceCard(instanceKey(selectedInstance));
-        updateChatHeader();
-      }
-
-      // Start polling for response
-      startSessionPoll();
-    } catch (err) {
-      toast('发送失败: ' + err.message, 'error');
-    }
+      await api(instPath(selectedInstance, '/send'), { method: 'POST', body: { text } });
+      toast('已发送到终端', 'success');
+    } catch (err) { toast('发送失败: ' + err.message, 'error'); }
   }
 
-  function onChatKeyDown(event) {
-    if (event.key === 'Enter' && !event.shiftKey) {
-      event.preventDefault();
-      sendMessage();
-    }
-  }
+  function onChatKeyDown(e) { if (e.key==='Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } }
+  function autoResize() { const i = $('chat-input'); i.style.height='auto'; i.style.height=Math.min(i.scrollHeight,120)+'px'; }
 
-  function autoResizeInput() {
-    const input = $('chat-input');
-    input.style.height = 'auto';
-    input.style.height = Math.min(input.scrollHeight, 120) + 'px';
-  }
-
-  async function abortCurrentSession() {
-    if (!selectedInstance || !currentSessionId) return;
-    try {
-      await api(instanceApiPath(selectedInstance, sessionSuffix('/abort', currentSessionId)), {
-        method: 'POST',
-      });
-      toast('已发送中止请求', 'info');
-    } catch (err) {
-      toast('中止失败: ' + err.message, 'error');
-    }
-  }
-
-  async function restartCurrentInstance() {
+  async function abortAudit() {
     if (!selectedInstance) return;
-    try {
-      toast('正在重启实例...', 'info');
-      await api(instanceApiPath(selectedInstance, '/stop'), { method: 'POST' });
-      await api(instanceApiPath(selectedInstance, '/start'), { method: 'POST' });
-      toast('✅ 实例已重启并就绪', 'success');
-      currentSessionId = null;
-      messages = [];
-      renderMessages();
-    } catch (err) {
-      toast('重启失败: ' + err.message, 'error');
-    }
+    try { await api(instPath(selectedInstance, '/abort'), { method:'POST' }); toast('已发送中止信号', 'info'); }
+    catch (err) { toast('中止失败: '+err.message, 'error'); }
   }
 
-  // ─── Launch / Setup ──────────────────────────────────────────────────
+  // ─── Popup Terminal ─────────────────────────────────────────────────
+
+  function openTerminalPopup(key) {
+    const w = 1100, h = 700;
+    window.open('/terminal/'+encodeURIComponent(key), 'term-'+key,
+      `width=${w},height=${h},left=${Math.max(0,(screen.width-w)/2)},top=${Math.max(0,(screen.height-h)/2)}`);
+  }
+
+  // ─── Launch ─────────────────────────────────────────────────────────
 
   async function launch() {
     const openCodeRoot = $('input-opencode-root').value.trim();
     const projectRoot = $('input-project-root').value.trim();
     const auditPrompt = $('input-audit-prompt').value.trim();
-    const maxConcurrent = parseInt($('input-max-concurrent').value) || 3;
-    const portStart = parseInt($('input-port-start').value) || 4100;
+    const maxConcurrent = parseInt($('input-max-concurrent').value)||3;
     const model = $('input-model').value.trim();
-
-    if (!projectRoot) {
-      toast('请输入被测项目根目录', 'error');
-      return;
-    }
-    if (!auditPrompt) {
-      toast('请输入审计 Prompt', 'error');
-      return;
-    }
-
-    const btn = $('btn-launch');
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spinner"></span> 扫描中...';
-
+    if (!projectRoot) { toast('请输入项目根目录','error'); return; }
+    if (!auditPrompt) { toast('请输入审计 Prompt','error'); return; }
+    const btn = $('btn-launch'); btn.disabled=true; btn.innerHTML='<span class="spinner"></span> 扫描中...';
     try {
-      // Save config globally
-      const configRes = await api('/api/config', {
-        method: 'POST',
-        body: { openCodeRoot, projectRoot, auditPrompt, maxConcurrent, portStart, model },
-      });
-
-      if (configRes.error) {
-        toast('配置保存失败: ' + configRes.error, 'error');
-        return;
-      }
-      
-      currentOpenCodeRoot = openCodeRoot || projectRoot;
-      currentProjectRoot = projectRoot;
+      await api('/api/config',{method:'POST',body:{openCodeRoot,projectRoot,auditPrompt,maxConcurrent,model}});
       currentModel = model;
-
-      // Scan project directory
-      const result = await api('/api/scan', {
-        method: 'POST',
-        body: { projectRoot },
-      });
-
-      if (!result.services || result.services.length === 0) {
-        toast('未找到 Git 仓库项目', 'error');
-        btn.disabled = false;
-        btn.innerHTML = '🚀 扫描并启动';
-        return;
-      }
-
+      const result = await api('/api/scan',{method:'POST',body:{projectRoot}});
+      if (!result.services?.length) { toast('未找到 Git 仓库项目','error'); btn.disabled=false; btn.innerHTML='🚀 扫描并启动'; return; }
       totalInstances = result.services.length;
-      toast(`发现 ${result.services.length} 个 Git 项目`, 'success');
-
-      // Switch to monitor screen
-      $('setup-screen').style.display = 'none';
-      $('monitor-screen').style.display = 'flex';
-
-      // Connect SSE
-      connectSSE();
-
-      // Load instances
-      instances = await api('/api/instances');
-      renderInstanceList();
-      renderStats();
-
-      // Start periodic instance refresh
-      startPeriodicRefresh();
-
-    } catch (err) {
-      toast('启动失败: ' + err.message, 'error');
-    }
-
-    btn.disabled = false;
-    btn.innerHTML = '🚀 扫描并启动';
+      toast(`发现 ${result.services.length} 个项目`,'success');
+      $('setup-screen').style.display='none'; $('monitor-screen').style.display='flex';
+      connectSSE(); instances = await api('/api/instances'); renderList(); renderStats(); startRefresh();
+    } catch(err) { toast('启动失败: '+err.message,'error'); }
+    btn.disabled=false; btn.innerHTML='🚀 扫描并启动';
   }
 
   function backToSetup() {
-    $('setup-screen').style.display = 'flex';
-    $('monitor-screen').style.display = 'none';
-    if (eventSource) eventSource.close();
-    if (pollTimer) clearInterval(pollTimer);
-    if (sessionPollTimer) clearInterval(sessionPollTimer);
+    $('setup-screen').style.display='flex'; $('monitor-screen').style.display='none';
+    if (eventSource) eventSource.close(); if (pollTimer) clearInterval(pollTimer);
     selectedInstance = null;
-    currentSessionId = null;
   }
 
-  function applyConfigToSetup(config) {
-    if (!config) return;
-
-    currentOpenCodeRoot = config.openCodeRoot || config.projectRoot || '';
-    currentProjectRoot = config.projectRoot || '';
-    currentModel = config.model || '';
-
-    if ($('input-opencode-root')) $('input-opencode-root').value = config.openCodeRoot || '';
-    if ($('input-project-root')) $('input-project-root').value = config.projectRoot || '';
-    if ($('input-audit-prompt')) $('input-audit-prompt').value = config.auditPrompt || '';
-    if ($('input-max-concurrent')) $('input-max-concurrent').value = config.maxConcurrent || 3;
-    if ($('input-port-start')) $('input-port-start').value = config.portStart || 4100;
-    if ($('input-model')) $('input-model').value = config.model || '';
+  function applyConfigToSetup(cfg) {
+    if (!cfg) return;
+    if ($('input-opencode-root')) $('input-opencode-root').value = cfg.openCodeRoot||'';
+    if ($('input-project-root')) $('input-project-root').value = cfg.projectRoot||'';
+    if ($('input-audit-prompt')) $('input-audit-prompt').value = cfg.auditPrompt||'';
+    if ($('input-max-concurrent')) $('input-max-concurrent').value = cfg.maxConcurrent||3;
+    if ($('input-model')) $('input-model').value = cfg.model||'';
+    currentModel = cfg.model||'';
   }
 
-  // ─── Batch Operations ────────────────────────────────────────────────
+  // ─── Batch ──────────────────────────────────────────────────────────
 
-  async function startAllInstances() {
-    try {
-      await api('/api/instances/start-all', { method: 'POST' });
-      toast('正在启动所有实例...', 'info');
-    } catch (err) {
-      toast('启动失败: ' + err.message, 'error');
-    }
-  }
-
-  async function stopAllInstances() {
-    try {
-      await api('/api/instances/stop-all', { method: 'POST' });
-      toast('正在停止所有实例...', 'info');
-    } catch (err) {
-      toast('停止失败: ' + err.message, 'error');
-    }
-  }
-
+  async function startAllInstances() { try { await api('/api/instances/start-all',{method:'POST'}); toast('启动中...'); } catch(err) { toast('失败: '+err.message,'error'); } }
+  async function stopAllInstances() { try { await api('/api/instances/stop-all',{method:'POST'}); toast('停止中...'); } catch(err) { toast('失败: '+err.message,'error'); } }
   async function startBatchAudit() {
-    const btn = $('btn-start-audit');
-    btn.disabled = true;
-
-    try {
-      const result = await api('/api/audit/start', { method: 'POST' });
-      toast(`批量审计已启动，${result.queued} 个在队列中`, 'success');
-    } catch (err) {
-      toast('审计启动失败: ' + err.message, 'error');
-    }
-
-    setTimeout(() => { btn.disabled = false; }, 2000);
+    $('btn-start-audit').disabled=true;
+    try { const r = await api('/api/audit/start',{method:'POST'}); toast(`批量审计已启动，${r.queued} 个在队列中`,'success'); }
+    catch(err) { toast('失败: '+err.message,'error'); }
+    setTimeout(() => { $('btn-start-audit').disabled=false; }, 2000);
   }
 
-  // ─── Periodic Refresh ────────────────────────────────────────────────
-
-  function startPeriodicRefresh() {
+  function startRefresh() {
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = setInterval(async () => {
-      try {
-        const latest = await api('/api/instances');
-        if (Array.isArray(latest)) {
-          instances = latest;
-          renderInstanceList();
-          renderStats();
-
-          // Update selected instance if it changed
-          if (selectedInstance) {
-            const selectedKey = instanceKey(selectedInstance);
-            const updated = instances.find(i => instanceKey(i) === selectedKey);
-            if (updated) {
-              const statusChanged = selectedInstance.status !== updated.status;
-              let sessionChanged = false;
-              selectedInstance = updated;
-
-              if (updated.sessionId && currentSessionId !== updated.sessionId) {
-                currentSessionId = updated.sessionId;
-                sessionChanged = true;
-              } else if (!updated.sessionId && currentSessionId) {
-                currentSessionId = null;
-                messages = [];
-                sessionChanged = true;
-              }
-
-              if (statusChanged || sessionChanged) {
-                updateChatHeader();
-              }
-            }
-          }
-        }
-      } catch {}
+      try { const latest = await api('/api/instances'); if (Array.isArray(latest)) { instances=latest; renderList(); renderStats(); if (selectedInstance) { const u = instances.find(i=>instanceKey(i)===instanceKey(selectedInstance)); if (u) { selectedInstance=u; updateHeader(); } } } } catch {}
     }, 8000);
   }
 
-  // ─── Auto-resize textarea ─────────────────────────────────────────────
+  // ─── Model ──────────────────────────────────────────────────────────
+
+  async function setGlobalModel(model) { try { await api('/api/global-model',{method:'POST',body:{model}}); toast('✅ 全局模型已更新','success'); } catch(e) { toast('失败','error'); } }
+  async function setInstanceModel(model) { if (!selectedInstance) return; try { await api(instPath(selectedInstance,'/model'),{method:'POST',body:{model}}); toast('✅ 实例模型已更新','success'); } catch(e) { toast('失败','error'); } }
+
+  // ─── Init ───────────────────────────────────────────────────────────
 
   document.addEventListener('DOMContentLoaded', async () => {
-    const input = $('chat-input');
-    if (input) {
-      input.addEventListener('input', autoResizeInput);
-    }
-
-    let serverConfig = null;
-    try {
-      serverConfig = await api('/api/config');
-      applyConfigToSetup(serverConfig);
-    } catch {}
-
-    // Load models
+    const input = $('chat-input'); if (input) input.addEventListener('input', autoResize);
+    let cfg = null;
+    try { cfg = await api('/api/config'); applyConfigToSetup(cfg); } catch {}
     try {
       const db = await api('/api/models');
-      if (db && db.models) {
-        const modelOptions = db.models.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('');
-        
-        // 1. Setup page datalist
-        const list = $('model-list');
-        if (list) {
-          list.innerHTML = db.models.map(m => `<option value="${escapeHtml(m)}"></option>`).join('');
-        }
-        
-        // 2. Global model select
-        const globalSel = $('global-model-select');
-        if (globalSel) {
-          globalSel.innerHTML = `<option value="">-- 系统默认模型 --</option>` + modelOptions;
-        }
-
-        // 3. Instance model select
-        const instSel = $('instance-model-select');
-        if (instSel) {
-          instSel.innerHTML = `<option value="">跟随系统默认设置</option>` + modelOptions;
-        }
+      if (db?.models) {
+        const models = normalizeModelOptions(db.models);
+        const opts = models.map(m => `<option value="${escapeHtml(m.value)}">${escapeHtml(m.label)}</option>`).join('');
+        const list = $('model-list'); if (list) list.innerHTML = models.map(m => `<option value="${escapeHtml(m.value)}" label="${escapeHtml(m.label)}"></option>`).join('');
+        const gs = $('global-model-select'); if (gs) gs.innerHTML = `<option value="">-- 系统默认 --</option>` + opts;
+        const is = $('instance-model-select'); if (is) is.innerHTML = `<option value="">系统默认</option>` + opts;
       }
     } catch {}
-
-    // Auto-resume: if server already has instances, skip setup
     try {
       const existing = await api('/api/instances');
-      if (Array.isArray(existing) && existing.length > 0) {
-        const config = serverConfig || await api('/api/config');
-        applyConfigToSetup(config);
-        instances = existing;
-        totalInstances = instances.length;
-
-        // Switch to monitor
-        $('setup-screen').style.display = 'none';
-        $('monitor-screen').style.display = 'flex';
-        connectSSE();
-        renderInstanceList();
-        renderStats();
-        startPeriodicRefresh();
+      if (Array.isArray(existing) && existing.length) {
+        applyConfigToSetup(cfg||await api('/api/config'));
+        instances=existing; totalInstances=instances.length;
+        $('setup-screen').style.display='none'; $('monitor-screen').style.display='flex';
+        connectSSE(); renderList(); renderStats(); startRefresh();
       }
     } catch {}
   });
 
-  // ─── Model Selection Logic ───────────────────────────────────────────
-
-  async function setGlobalModel(model) {
-    try {
-      await api('/api/global-model', { method: 'POST', body: { model } });
-      toast('✅ 已成功更改全局模型策略', 'success');
-      // Also update local selected instance model dropdown visually immediately if it matched previous config
-      const instSel = $('instance-model-select');
-      if (instSel && !instSel.value) {
-        // Keeps following system default visually
-      }
-    } catch (err) {
-      toast('全局模型修改失败: ' + err.message, 'error');
-    }
-  }
-
-  async function setInstanceModel(model) {
-    if (!selectedInstance) return;
-    try {
-      await api(instanceApiPath(selectedInstance, '/model'), { method: 'POST', body: { model } });
-      toast(`✅ 已为 ${selectedInstance.name} 分配独立模型`, 'success');
-    } catch (err) {
-      toast('实例模型修改失败: ' + err.message, 'error');
-    }
-  }
-
-  function toggleAutoRefresh(checked) {
-    if (!selectedInstance) return;
-    instanceAutoRefresh.set(instanceKey(selectedInstance), checked);
-  }
-
-  // ─── Public API ──────────────────────────────────────────────────────
-
-  return {
-    launch,
-    backToSetup,
-    startBatchAudit,
-    startAllInstances,
-    stopAllInstances,
-    sendMessage,
-    onChatKeyDown,
-    refreshMessages,
-    abortCurrentSession,
-    restartCurrentInstance,
-    selectInstance,
-    setGlobalModel,
-    setInstanceModel,
-    toggleAutoRefresh,
-  };
+  return { launch, backToSetup, startBatchAudit, startAllInstances, stopAllInstances, sendMessage, onChatKeyDown, abortAudit, selectInstance, setGlobalModel, setInstanceModel, openTerminalPopup };
 })();

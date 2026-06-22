@@ -1,9 +1,9 @@
 const express = require('express');
-const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
-const treeKill = require('tree-kill');
+const tmux = require('./lib/tmux-manager');
+const createTerminalWSServer = require('./lib/terminal-ws');
 
 const app = express();
 app.use(express.json());
@@ -15,29 +15,14 @@ let CONFIG = {
   openCodeRoot: '',
   projectRoot: '',
   auditPrompt: '',
-  portStart: 4100, // Global Server Port
   backendPort: parseInt(process.env.PORT) || 8888,
   maxConcurrent: 3,
   model: '',
 };
 
-let globalServer = {
-  process: null,
-  pid: null,
-  port: 4100,
-  status: 'stopped', // 'stopped', 'starting', 'ready', 'error'
-  error: null,
-  lastErrorLog: null,
-};
-
-let ocEventSource = null; // SSE connection to OpenCode /global/event
-
-// Virtual Instances => Maps to a Session on globalServer
-// Instance = { id, name, dir, relDir, status, sessionId, error, startedAt }
 const instances = new Map();
 const sseClients = new Set();
 
-// Queue for batch audit
 let auditQueue = [];
 let activeAudits = 0;
 
@@ -48,11 +33,7 @@ function cleanPath(value) {
 }
 
 function isDirectory(dir) {
-  try {
-    return !!dir && fs.statSync(dir).isDirectory();
-  } catch {
-    return false;
-  }
+  try { return !!dir && fs.statSync(dir).isDirectory(); } catch { return false; }
 }
 
 function isGitRepository(dir) {
@@ -60,15 +41,7 @@ function isGitRepository(dir) {
 }
 
 const SCAN_IGNORED_DIRS = new Set([
-  '.git',
-  'node_modules',
-  'vendor',
-  'dist',
-  'build',
-  'coverage',
-  '.next',
-  '.nuxt',
-  '.cache',
+  '.git', 'node_modules', 'vendor', 'dist', 'build', 'coverage', '.next', '.nuxt', '.cache',
 ]);
 
 function shouldSkipScanDir(name) {
@@ -85,49 +58,32 @@ function createInstanceId(label, usedIds) {
     .replace(/^\.\//, '')
     .replace(/[^a-zA-Z0-9._-]+/g, '-')
     .replace(/^-+|-+$/g, '') || 'root';
-
   let id = safe;
   let suffix = 2;
-  while (usedIds.has(id)) {
-    id = `${safe}-${suffix}`;
-    suffix++;
-  }
+  while (usedIds.has(id)) { id = `${safe}-${suffix}`; suffix++; }
   usedIds.add(id);
   return id;
 }
 
 function discoverGitProjects(root) {
   const projects = [];
-
   function walk(currentDir) {
-    if (isGitRepository(currentDir)) {
-      projects.push(currentDir);
-      return;
-    }
-
+    if (isGitRepository(currentDir)) { projects.push(currentDir); return; }
     let entries;
-    try {
-      entries = fs.readdirSync(currentDir, { withFileTypes: true });
-    } catch (err) {
-      console.warn(`[SCAN] Skipping unreadable directory ${currentDir}: ${err.message}`);
-      return;
-    }
-
+    try { entries = fs.readdirSync(currentDir, { withFileTypes: true }); }
+    catch (err) { console.warn(`[SCAN] Skipping ${currentDir}: ${err.message}`); return; }
     entries
-      .filter((entry) => entry.isDirectory() && !shouldSkipScanDir(entry.name))
+      .filter(e => e.isDirectory() && !shouldSkipScanDir(e.name))
       .sort((a, b) => a.name.localeCompare(b.name))
-      .forEach((entry) => walk(path.join(currentDir, entry.name)));
+      .forEach(e => walk(path.join(currentDir, e.name)));
   }
-
   walk(root);
-
   const usedIds = new Set();
-  return projects.map((dir) => {
+  return projects.map(dir => {
     const relDir = toPosixRelative(root, dir);
-    const displayName = relDir || path.basename(dir) || dir;
     return {
-      id: createInstanceId(displayName, usedIds),
-      name: displayName,
+      id: createInstanceId(relDir || path.basename(dir) || dir, usedIds),
+      name: relDir || path.basename(dir) || dir,
       relDir,
       dir,
     };
@@ -135,353 +91,76 @@ function discoverGitProjects(root) {
 }
 
 function getOpenCodeRoot() {
-  return CONFIG.openCodeRoot || CONFIG.projectRoot || process.cwd();
-}
-
-function getServerIdentity() {
-  return `${getOpenCodeRoot()}::${CONFIG.portStart}`;
+  return CONFIG.openCodeRoot || process.cwd();
 }
 
 function loadConfigFile() {
   const configPath = path.join(__dirname, 'config.json');
   if (!fs.existsSync(configPath)) return;
-
   try {
-    const fileConfig = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    const openCodeRoot =
-      cleanPath(fileConfig.openCodeRoot) ||
-      cleanPath(fileConfig.opencodeRoot) ||
-      cleanPath(fileConfig.agentRoot);
-
-    if (openCodeRoot) CONFIG.openCodeRoot = openCodeRoot;
-    if (typeof fileConfig.projectRoot === 'string') CONFIG.projectRoot = cleanPath(fileConfig.projectRoot);
-    if (typeof fileConfig.auditPrompt === 'string') CONFIG.auditPrompt = fileConfig.auditPrompt;
-    if (fileConfig.portStart) CONFIG.portStart = Number(fileConfig.portStart);
-    if (fileConfig.portRange?.start) CONFIG.portStart = Number(fileConfig.portRange.start);
-    if (fileConfig.backendPort && !process.env.PORT) CONFIG.backendPort = Number(fileConfig.backendPort);
-    if (fileConfig.maxConcurrent) CONFIG.maxConcurrent = Number(fileConfig.maxConcurrent);
-    if (typeof fileConfig.model === 'string') CONFIG.model = fileConfig.model;
-  } catch (err) {
-    console.error('[CONFIG] Failed to load config.json:', err.message);
-  }
+    const fc = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    const root = cleanPath(fc.openCodeRoot) || cleanPath(fc.opencodeRoot) || cleanPath(fc.agentRoot);
+    if (root) CONFIG.openCodeRoot = root;
+    if (typeof fc.projectRoot === 'string') CONFIG.projectRoot = cleanPath(fc.projectRoot);
+    if (typeof fc.auditPrompt === 'string') CONFIG.auditPrompt = fc.auditPrompt;
+    if (fc.backendPort && !process.env.PORT) CONFIG.backendPort = Number(fc.backendPort);
+    if (fc.maxConcurrent) CONFIG.maxConcurrent = Number(fc.maxConcurrent);
+    if (typeof fc.model === 'string') CONFIG.model = fc.model;
+  } catch (err) { console.error('[CONFIG] Failed:', err.message); }
 }
 
 loadConfigFile();
 
-function ocFetch(port, urlPath, options = {}) {
-  return new Promise((resolve, reject) => {
-    const method = options.method || 'GET';
-    const body = options.body ? JSON.stringify(options.body) : null;
-    const reqOpts = {
-      hostname: '127.0.0.1',
-      port,
-      path: urlPath,
-      method,
-      headers: { 'Content-Type': 'application/json' },
-      timeout: 30000,
-    };
-    const req = http.request(reqOpts, (res) => {
-      let data = '';
-      res.on('data', (chunk) => (data += chunk));
-      res.on('end', () => {
-        try {
-          resolve({ status: res.statusCode, data: data ? JSON.parse(data) : null });
-        } catch {
-          resolve({ status: res.statusCode, data: data });
-        }
-      });
-    });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-    if (body) req.write(body);
-    req.end();
-  });
-}
-
-function sessionPath(sessionId, suffix = '') {
-  return `/session/${encodeURIComponent(sessionId)}${suffix}`;
-}
-
 function broadcast(event, data) {
   const msg = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-  for (const client of sseClients) {
-    client.write(msg);
-  }
+  for (const c of sseClients) c.write(msg);
 }
 
 function getInstanceSummary(inst) {
   return {
-    id: inst.id,
-    name: inst.name,
-    relDir: inst.relDir,
-    dir: inst.dir,
-    port: globalServer.port,
-    pid: globalServer.pid || null,
-    status: inst.status,
-    sessionId: inst.sessionId || null,
-    error: inst.error || null,
-    startedAt: inst.startedAt || null,
-    model: inst.model || null,
+    id: inst.id, name: inst.name, relDir: inst.relDir, dir: inst.dir,
+    status: inst.status, error: inst.error || null,
+    startedAt: inst.startedAt || null, model: inst.model || null,
   };
 }
 
-function buildTargetDirectoryInstruction(inst) {
-  return `⚠️ 重要指令：请只在以下目标工作目录中执行任务，不要分析外部的兄弟目录文件。\n目标工作目录: [${inst.dir}]`;
-}
-
-function withTargetDirectoryContext(body, inst) {
-  const promptBody = body && typeof body === 'object' ? { ...body } : {};
-  const instruction = buildTargetDirectoryInstruction(inst);
-  const parts = Array.isArray(promptBody.parts) ? [...promptBody.parts] : [];
-  const firstTextIndex = parts.findIndex((part) => part && part.type === 'text');
-
-  if (firstTextIndex >= 0) {
-    const part = parts[firstTextIndex];
-    parts[firstTextIndex] = {
-      ...part,
-      text: `${instruction}\n\n---用户请求---\n${part.text || part.content || ''}`,
-    };
-  } else {
-    parts.unshift({ type: 'text', text: instruction });
-  }
-
-  return { ...promptBody, parts };
-}
-
-// ─── Global Server Manager ───────────────────────────────────────────────────
-
-async function startGlobalServer() {
-  if (globalServer.status === 'ready') return { ok: true };
-  if (globalServer.status === 'starting') {
-    let retries = 0;
-    while (globalServer.status === 'starting' && retries < 40) {
-      await new Promise(r => setTimeout(r, 1000));
-      retries++;
-    }
-    if (globalServer.status === 'ready') return { ok: true };
-    return { error: 'Global server failed to start' };
-  }
-
-  const openCodeRoot = getOpenCodeRoot();
-  if (!isDirectory(openCodeRoot)) {
-    globalServer.status = 'error';
-    globalServer.error = `Invalid OpenCode settings root: ${openCodeRoot}`;
-    return { error: globalServer.error };
-  }
-
-  console.log(`[SYSTEM] Starting Global OpenCode Server at ${openCodeRoot} (Port: ${CONFIG.portStart})`);
-  globalServer.status = 'starting';
-  globalServer.port = CONFIG.portStart;
-  globalServer.error = null;
-
-  const env = {
-    ...process.env,
-    PORT: String(globalServer.port + 1000), // Internal collision prevention
-  };
-
-  const proc = spawn('opencode', ['serve', '--port', String(globalServer.port), '--hostname', '127.0.0.1'], {
-    cwd: openCodeRoot, // OpenCode agent/config workspace, separate from the audited project root
-    env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    shell: true,
-    windowsHide: true,
-  });
-
-  globalServer.process = proc;
-  globalServer.pid = proc.pid;
-
-  proc.stdout.on('data', (data) => {
-    const line = data.toString().trim();
-    if (line) {
-      console.log(`[OPNCD OUT]`, line);
-    }
-  });
-
-  proc.stderr.on('data', (data) => {
-    const line = data.toString().trim();
-    if (line) {
-      console.error(`[OPNCD ERR]`, line);
-      globalServer.lastErrorLog = line;
-    }
-  });
-
-  proc.on('exit', (code) => {
-    console.log(`[SYSTEM] Global OpenCode Server Exited (${code})`);
-    globalServer.status = 'error';
-    globalServer.error = `Global server exited (${code}). ${globalServer.lastErrorLog ? globalServer.lastErrorLog.substring(0, 50) : ''}`;
-    globalServer.process = null;
-    globalServer.pid = null;
-
-    // Cascade failure to instances
-    for (const [name, inst] of instances) {
-      if (inst.status !== 'stopped' && inst.status !== 'completed') {
-        inst.status = 'error';
-        inst.error = 'Global server crashed or was stopped';
-        broadcast('instance.update', getInstanceSummary(inst));
-      }
-    }
-  });
-
-  // Wait for health
-  for (let i = 0; i < 40; i++) {
-    try {
-      const res = await ocFetch(globalServer.port, '/global/health');
-      if (res.status === 200 && res.data && res.data.healthy) {
-        
-        // Ensure permissions are globally allowed via REST API (bypasses ENV bugs)
-        try {
-          await ocFetch(globalServer.port, '/config', {
-            method: 'PATCH',
-            body: { permission: 'allow' }
-          });
-        } catch (e) {
-          console.error('[SYSTEM] Failed to apply global permissions:', e);
-        }
-
-        console.log(`[SYSTEM] Global OpenCode Server Ready!`);
-        globalServer.status = 'ready';
-        subscribeToOpenCodeEvents();
-        return { ok: true };
-      }
-    } catch {}
-    await new Promise((r) => setTimeout(r, 1500));
-  }
-
-  globalServer.status = 'error';
-  globalServer.error = 'Health check timed out';
-  return { error: 'Global server health check timeout' };
-}
-
-async function stopGlobalServer() {
-  if (globalServer.pid) {
-    try {
-      await new Promise((resolve) => treeKill(globalServer.pid, 'SIGTERM', resolve));
-    } catch {}
-  }
-  globalServer.process = null;
-  globalServer.pid = null;
-  globalServer.status = 'stopped';
-  if (ocEventSource) {
-    ocEventSource.destroy();
-    ocEventSource = null;
-  }
-}
-
-// ─── OpenCode SSE Event Subscription ─────────────────────────────────────────
-
-function subscribeToOpenCodeEvents() {
-  if (ocEventSource) {
-    ocEventSource.destroy();
-    ocEventSource = null;
-  }
-
-  console.log('[SSE-OC] Subscribing to OpenCode /global/event...');
-
-  const req = http.get(`http://127.0.0.1:${globalServer.port}/global/event`, {
-    headers: { 'Accept': 'text/event-stream' }
-  }, (res) => {
-    if (res.statusCode !== 200) {
-      console.error('[SSE-OC] Failed to connect, status:', res.statusCode);
-      return;
-    }
-    console.log('[SSE-OC] Connected to OpenCode event stream');
-
-    let buffer = '';
-    res.on('data', (chunk) => {
-      buffer += chunk.toString();
-      const parts = buffer.split('\n\n');
-      buffer = parts.pop();
-
-      for (const part of parts) {
-        if (!part.trim()) continue;
-        const lines = part.split('\n');
-        let data = '';
-        for (const line of lines) {
-          if (line.startsWith('data:')) data = line.slice(5).trim();
-        }
-        if (!data) continue;
-
-        try {
-          const parsed = JSON.parse(data);
-          const type = parsed.payload && parsed.payload.type;
-          const props = parsed.payload && parsed.payload.properties;
-
-          if (type === 'session.idle' && props && props.sessionID) {
-            handleSessionIdle(props.sessionID);
-          }
-        } catch {}
-      }
-    });
-
-    res.on('end', () => {
-      console.log('[SSE-OC] Event stream ended, reconnecting in 3s...');
-      setTimeout(() => {
-        if (globalServer.status === 'ready') subscribeToOpenCodeEvents();
-      }, 3000);
-    });
-  });
-
-  req.on('error', (err) => {
-    console.error('[SSE-OC] Connection error:', err.message, '— reconnecting in 5s...');
-    setTimeout(() => {
-      if (globalServer.status === 'ready') subscribeToOpenCodeEvents();
-    }, 5000);
-  });
-
-  ocEventSource = req;
-}
-
-function handleSessionIdle(sessionId) {
-  for (const [id, inst] of instances) {
-    if (inst.sessionId === sessionId && inst.status === 'auditing') {
-      console.log(`[SSE-OC] session.idle received for ${inst.name} (${sessionId})`);
-      inst.status = 'completed';
-      broadcast('instance.update', getInstanceSummary(inst));
-      onAuditFinished(id);
-      return;
-    }
-  }
-}
-
-// ─── Virtual Process Manager ─────────────────────────────────────────────────
+// ─── Instance Lifecycle ─────────────────────────────────────────────────────
 
 async function startInstance(id) {
   const inst = instances.get(id);
   if (!inst) return { error: `Instance ${id} not found` };
-  if (inst.status !== 'stopped' && inst.status !== 'error' && inst.status !== 'completed') {
-    return { error: `Instance ${inst.name} is already ${inst.status}` };
+  if (inst.status === 'ready' || inst.status === 'auditing') return { ok: true };
+  if (inst.status === 'starting') {
+    for (let i = 0; i < 30; i++) {
+      await new Promise(r => setTimeout(r, 1000));
+      if (inst.status === 'ready' || inst.status === 'auditing') return { ok: true };
+    }
+    return { error: 'Instance start timed out' };
   }
 
+  const openCodeRoot = getOpenCodeRoot();
+  const workDir = inst.dir;
+
+  console.log(`[INSTANCE] Starting opencode CLI for ${inst.name} in ${workDir}`);
   inst.status = 'starting';
   inst.error = null;
   broadcast('instance.update', getInstanceSummary(inst));
 
-  const res = await startGlobalServer();
-  if (res.error) {
-    inst.status = 'error';
-    inst.error = res.error;
-    broadcast('instance.update', getInstanceSummary(inst));
-    return { error: res.error };
-  }
-
   try {
-    const sessionRes = await ocFetch(globalServer.port, '/session', {
-      method: 'POST',
-      body: { title: `Audit: ${inst.name}` },
-    });
-
-    if (!sessionRes.data || !sessionRes.data.id) {
-      throw new Error('Failed to create session on global server');
+    const env = { ...process.env };
+    if (openCodeRoot && openCodeRoot !== workDir) {
+      env.OPENCODE_ROOT = openCodeRoot;
     }
 
-    inst.sessionId = sessionRes.data.id;
+    await tmux.createSessionWithEnv(inst.id, 'opencode', workDir, env, { cols: 160, rows: 40 });
+
     inst.status = 'ready';
     inst.startedAt = new Date().toISOString();
     broadcast('instance.update', getInstanceSummary(inst));
     return { ok: true };
   } catch (err) {
     inst.status = 'error';
-    inst.error = `Session creation failed: ${err.message}`;
+    inst.error = err.message;
     broadcast('instance.update', getInstanceSummary(inst));
     return { error: err.message };
   }
@@ -492,21 +171,38 @@ async function stopInstance(id) {
   if (!inst) return { error: `Instance ${id} not found` };
   if (inst.status === 'stopped') return { ok: true };
 
+  console.log(`[INSTANCE] Stopping ${inst.name}...`);
+
+  try {
+    await tmux.sendKeys(tmux.sessionName(inst.id), 'C-c');
+    await new Promise(r => setTimeout(r, 1000));
+    await tmux.killSession(tmux.sessionName(inst.id));
+  } catch {}
+
   inst.status = 'stopped';
   inst.error = null;
-
-  if (inst.sessionId && globalServer.status === 'ready') {
-    try {
-      await ocFetch(globalServer.port, sessionPath(inst.sessionId, '/abort'), { method: 'POST' });
-    } catch {}
-  }
-  
-  inst.sessionId = null;
   broadcast('instance.update', getInstanceSummary(inst));
   return { ok: true };
 }
 
 // ─── Audit Engine ────────────────────────────────────────────────────────────
+
+async function sendPromptToTerminal(id, promptText) {
+  const sessionId = tmux.sessionName(id);
+  const target = tmux.windowTarget(sessionId);
+  // Load prompt into tmux paste buffer, then paste into target pane
+  await new Promise((resolve, reject) => {
+    const proc = require('child_process').spawn('tmux', ['load-buffer', '-'], {
+      stdio: ['pipe', 'ignore', 'pipe'],
+    });
+    proc.on('error', reject);
+    proc.on('close', code => code === 0 ? resolve() : reject(new Error(`load-buffer exit ${code}`)));
+    proc.stdin.write(promptText);
+    proc.stdin.end();
+  });
+  await tmux.exec(['paste-buffer', '-t', target]);
+  await tmux.sendEnter(sessionId);
+}
 
 async function runAuditForInstance(id) {
   const inst = instances.get(id);
@@ -516,17 +212,10 @@ async function runAuditForInstance(id) {
     inst.status = 'auditing';
     broadcast('instance.update', getInstanceSummary(inst));
 
-    const promptBody = withTargetDirectoryContext({
-      parts: [{ type: 'text', text: `---任务要求---\n${CONFIG.auditPrompt}` }],
-      model: inst.model || CONFIG.model || undefined,
-    }, inst);
+    const prompt = `${CONFIG.auditPrompt}\n\n⚠️ 重要指令：请只在以下目标工作目录中执行任务，不要分析外部目录文件。\n目标工作目录: [${inst.dir}]`;
+    await sendPromptToTerminal(id, prompt);
 
-    await ocFetch(globalServer.port, sessionPath(inst.sessionId, '/prompt_async'), {
-      method: 'POST',
-      body: promptBody,
-    });
-
-    pollAuditCompletion(id, inst.sessionId);
+    scheduleAuditTimeout(id);
   } catch (err) {
     inst.status = 'error';
     inst.error = err.message;
@@ -535,16 +224,11 @@ async function runAuditForInstance(id) {
   }
 }
 
-// pollAuditCompletion is now just a safety-net timeout.
-// Real completion detection is handled by SSE session.idle events.
-function pollAuditCompletion(id, sessionId) {
-  const inst = instances.get(id);
-  if (!inst) return;
-
-  // Safety timeout: if SSE somehow misses the event, force complete after 30 min
+function scheduleAuditTimeout(id) {
   setTimeout(() => {
-    if (inst.status === 'auditing') {
-      console.log(`[TIMEOUT] Force-completing ${inst.name} after 30min timeout`);
+    const inst = instances.get(id);
+    if (inst && inst.status === 'auditing') {
+      console.log(`[TIMEOUT] Force-completing ${inst.name} after 30min`);
       inst.status = 'completed';
       broadcast('instance.update', getInstanceSummary(inst));
       onAuditFinished(id);
@@ -561,185 +245,114 @@ function processAuditQueue() {
   while (auditQueue.length > 0 && activeAudits < CONFIG.maxConcurrent) {
     const id = auditQueue.shift();
     const inst = instances.get(id);
-    if (inst && isAuditQueueCandidate(inst.status)) {
+    if (inst && isAuditCandidate(inst.status)) {
       activeAudits++;
       runQueuedAudit(id);
     }
   }
-  broadcast('audit.queue', {
-    queued: auditQueue.length,
-    active: activeAudits,
-    max: CONFIG.maxConcurrent,
-  });
+  broadcast('audit.queue', { queued: auditQueue.length, active: activeAudits, max: CONFIG.maxConcurrent });
 }
 
-function isAuditQueueCandidate(status) {
+function isAuditCandidate(status) {
   return status === 'ready' || status === 'stopped' || status === 'error' || status === 'completed';
 }
 
 async function runQueuedAudit(id) {
   const inst = instances.get(id);
-  if (!inst) {
-    onAuditFinished(id);
-    return;
-  }
-
+  if (!inst) { onAuditFinished(id); return; }
   try {
     if (inst.status !== 'ready') {
-      const startRes = await startInstance(id);
-      if (startRes.error) throw new Error(startRes.error);
+      const r = await startInstance(id);
+      if (r.error) throw new Error(r.error);
     }
-
-    const readyInst = instances.get(id);
-    if (!readyInst || readyInst.status !== 'ready') {
-      throw new Error(`Instance ${inst.name} is ${readyInst?.status || 'missing'}, not ready`);
-    }
-
+    const ready = instances.get(id);
+    if (!ready || ready.status !== 'ready') throw new Error(`Instance not ready`);
     await runAuditForInstance(id);
   } catch (err) {
-    const failedInst = instances.get(id);
-    if (failedInst) {
-      failedInst.status = 'error';
-      failedInst.error = err.message;
-      broadcast('instance.update', getInstanceSummary(failedInst));
-    }
+    const failed = instances.get(id);
+    if (failed) { failed.status = 'error'; failed.error = err.message; broadcast('instance.update', getInstanceSummary(failed)); }
     onAuditFinished(id);
   }
 }
 
+// Terminal popup page — serves terminal.html with instance context
+app.get('/terminal/:id', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'terminal.html'));
+});
+
 // ─── API Routes ──────────────────────────────────────────────────────────────
 
-// SSE endpoint
 app.get('/api/events', (req, res) => {
   res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    Connection: 'keep-alive',
-    'Access-Control-Allow-Origin': '*',
+    'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache',
+    Connection: 'keep-alive', 'Access-Control-Allow-Origin': '*',
   });
   res.write(`event: connected\ndata: ${JSON.stringify({ time: Date.now() })}\n\n`);
   sseClients.add(res);
   req.on('close', () => sseClients.delete(res));
 });
 
-// Config
 app.post('/api/config', (req, res) => {
-  const { auditPrompt, maxConcurrent, portStart, model } = req.body;
-  const hasOpenCodeRoot = Object.prototype.hasOwnProperty.call(req.body, 'openCodeRoot');
-  const hasProjectRoot = Object.prototype.hasOwnProperty.call(req.body, 'projectRoot');
-  const openCodeRoot = hasOpenCodeRoot ? cleanPath(req.body.openCodeRoot) : CONFIG.openCodeRoot;
-  const projectRoot = hasProjectRoot ? cleanPath(req.body.projectRoot) : CONFIG.projectRoot;
-  const previousServerIdentity = getServerIdentity();
-
-  if (openCodeRoot && !isDirectory(openCodeRoot)) {
-    return res.status(400).json({ error: 'Invalid OpenCode settings root' });
-  }
-  if (projectRoot && !isDirectory(projectRoot)) {
-    return res.status(400).json({ error: 'Invalid project root' });
-  }
-
-  if (hasOpenCodeRoot) CONFIG.openCodeRoot = openCodeRoot;
-  if (hasProjectRoot) CONFIG.projectRoot = projectRoot;
+  const { auditPrompt, maxConcurrent, model, openCodeRoot, projectRoot } = req.body;
+  if (openCodeRoot !== undefined) CONFIG.openCodeRoot = cleanPath(openCodeRoot);
+  if (projectRoot !== undefined) CONFIG.projectRoot = cleanPath(projectRoot);
   if (auditPrompt) CONFIG.auditPrompt = auditPrompt;
   if (maxConcurrent) CONFIG.maxConcurrent = Number(maxConcurrent);
-  if (portStart) CONFIG.portStart = Number(portStart);
   if (model !== undefined) CONFIG.model = model;
-
-  if (getServerIdentity() !== previousServerIdentity) {
-    stopGlobalServer();
-  }
-
   res.json({ ok: true, config: CONFIG });
 });
 
-app.get('/api/config', (req, res) => {
-  res.json(CONFIG);
-});
+app.get('/api/config', (req, res) => res.json(CONFIG));
 
-// Scan project root recursively for Git repositories
 app.post('/api/scan', (req, res) => {
   const root = cleanPath(req.body.projectRoot) || CONFIG.projectRoot;
-  const previousServerIdentity = getServerIdentity();
-
-  if (!isDirectory(root)) {
-    return res.status(400).json({ error: 'Invalid project root' });
-  }
-
+  if (!isDirectory(root)) return res.status(400).json({ error: 'Invalid project root' });
   CONFIG.projectRoot = root;
 
-  if (getServerIdentity() !== previousServerIdentity) {
-    stopGlobalServer();
-  }
-
-  const projects = discoverGitProjects(root);
-
-  for (const [id] of instances) {
-    stopInstance(id);
-  }
+  for (const [id] of instances) stopInstance(id);
   instances.clear();
 
-  projects.forEach((project) => {
-    instances.set(project.id, {
-      id: project.id,
-      name: project.name,
-      relDir: project.relDir,
-      dir: project.dir,
-      status: 'stopped',
-      sessionId: null,
-      error: null,
-      startedAt: null,
-      model: CONFIG.model || '',
-    });
-  });
+  const projects = discoverGitProjects(root);
+  projects.forEach(p => instances.set(p.id, {
+    id: p.id, name: p.name, relDir: p.relDir, dir: p.dir,
+    status: 'stopped', error: null, startedAt: null, model: CONFIG.model || '',
+  }));
 
-  const summaries = projects.map((project) => getInstanceSummary(instances.get(project.id)));
+  const summaries = projects.map(p => getInstanceSummary(instances.get(p.id)));
   broadcast('instances.reset', summaries);
-  res.json({
-    ok: true,
-    services: summaries.map((project) => project.name),
-    projects: summaries,
-  });
+  res.json({ ok: true, services: summaries.map(s => s.name), projects: summaries });
 });
 
-// Get available models dynamically from OpenCode global server
 app.get('/api/models', async (req, res) => {
-  const oldOpenCodeRoot = CONFIG.openCodeRoot;
-  let changed = false;
-  
-  if (!CONFIG.openCodeRoot && !CONFIG.projectRoot) {
-    CONFIG.openCodeRoot = process.cwd();
-    changed = true;
-  }
-
-  const startRes = await startGlobalServer();
-  
-  if (changed) {
-    CONFIG.openCodeRoot = oldOpenCodeRoot;
-  }
-  
-  if (startRes.error) return res.status(500).json({ error: startRes.error });
-
+  // Models are discovered from opencode config at openCodeRoot
   try {
-    const configRes = await ocFetch(globalServer.port, '/config');
-    const providers = configRes.data?.provider || {};
-    const modelSet = new Set();
-    
-    for (const provider of Object.values(providers)) {
-      if (provider.models) {
-        Object.keys(provider.models).forEach(m => modelSet.add(m));
-      }
-    }
-    
-    res.json({ models: Array.from(modelSet) });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+    const { spawn } = require('child_process');
+    const root = getOpenCodeRoot();
+    const proc = spawn('opencode', ['config', '--json'], { cwd: root, stdio: 'pipe', timeout: 10000 });
+    let out = '';
+    proc.stdout.on('data', d => out += d);
+    proc.on('close', code => {
+      if (code !== 0) return res.json({ models: [] });
+      try {
+        const parsed = JSON.parse(out);
+        const providers = parsed.provider || {};
+        const models = [];
+        for (const [pid, p] of Object.entries(providers)) {
+          if (p.models) {
+            for (const [mid, m] of Object.entries(p.models)) {
+              models.push({ value: `${pid}/${mid}`, label: `${pid} / ${m?.name || mid}`, providerID: pid, modelID: mid, name: m?.name || mid });
+            }
+          }
+        }
+        res.json({ models });
+      } catch { res.json({ models: [] }); }
+    });
+    proc.on('error', () => res.json({ models: [] }));
+  } catch { res.json({ models: [] }); }
 });
 
-// Update global model
 app.post('/api/global-model', (req, res) => {
-  const { model } = req.body;
-  CONFIG.model = model || '';
+  CONFIG.model = req.body.model || '';
   for (const [, inst] of instances) {
     inst.model = CONFIG.model;
     broadcast('instance.update', getInstanceSummary(inst));
@@ -747,113 +360,89 @@ app.post('/api/global-model', (req, res) => {
   res.json({ ok: true });
 });
 
-// Update instance specific model
 app.post('/api/instances/:id/model', (req, res) => {
-  const { model } = req.body;
   const inst = instances.get(req.params.id);
   if (!inst) return res.status(404).json({ error: 'Not found' });
-  inst.model = model || '';
+  inst.model = req.body.model || '';
   broadcast('instance.update', getInstanceSummary(inst));
   res.json({ ok: true });
 });
 
-// List all instances
 app.get('/api/instances', (req, res) => {
-  const list = [];
-  for (const inst of instances.values()) {
-    list.push(getInstanceSummary(inst));
-  }
-  res.json(list);
+  res.json([...instances.values()].map(getInstanceSummary));
 });
 
-// Get single instance
 app.get('/api/instances/:id', (req, res) => {
   const inst = instances.get(req.params.id);
   if (!inst) return res.status(404).json({ error: 'Not found' });
   res.json(getInstanceSummary(inst));
 });
 
-// Start all instances
 app.post('/api/instances/start-all', async (req, res) => {
   const results = {};
-  for (const [id] of instances) {
-    results[id] = await startInstance(id);
-  }
+  for (const [id] of instances) results[id] = await startInstance(id);
   res.json(results);
 });
 
-// Stop all instances
 app.post('/api/instances/stop-all', async (req, res) => {
   const results = {};
-  for (const [id] of instances) {
-    results[id] = await stopInstance(id);
-  }
+  for (const [id] of instances) results[id] = await stopInstance(id);
   res.json(results);
 });
 
-// Start single instance
 app.post('/api/instances/:id/start', async (req, res) => {
   res.json(await startInstance(req.params.id));
 });
 
-// Stop single instance
 app.post('/api/instances/:id/stop', async (req, res) => {
   res.json(await stopInstance(req.params.id));
 });
 
-// ─── Audit Routes ────────────────────────────────────────────────────────────
-
-// Start batch audit
-app.post('/api/audit/start', async (req, res) => {
-  if (!CONFIG.auditPrompt) {
-    return res.status(400).json({ error: 'Audit prompt not set' });
+// Send text to an instance's terminal
+app.post('/api/instances/:id/send', async (req, res) => {
+  const inst = instances.get(req.params.id);
+  if (!inst) return res.status(404).json({ error: 'Not found' });
+  if (inst.status !== 'ready' && inst.status !== 'auditing') {
+    return res.status(400).json({ error: `Instance is ${inst.status}` });
   }
-
-  auditQueue = [];
-  activeAudits = 0;
-
-  for (const [id, inst] of instances) {
-    if (isAuditQueueCandidate(inst.status)) {
-      auditQueue.push(id);
-    }
+  const text = req.body.text || '';
+  if (!text) return res.status(400).json({ error: 'No text provided' });
+  try {
+    await sendPromptToTerminal(req.params.id, text);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-
-  // Pre-start the global server so we don't start it multiple times simultaneously in poor locking
-  const startRes = await startGlobalServer();
-  if (startRes.error) return res.status(500).json({ error: startRes.error });
-
-  processAuditQueue();
-
-  res.json({
-    ok: true,
-    queued: auditQueue.length,
-    active: activeAudits,
-  });
 });
 
-// Start single audit
+// ─── Audit Routes ────────────────────────────────────────────────────────────
+
+app.post('/api/audit/start', async (req, res) => {
+  if (!CONFIG.auditPrompt) return res.status(400).json({ error: 'Audit prompt not set' });
+  auditQueue = [];
+  activeAudits = 0;
+  for (const [id, inst] of instances) {
+    if (isAuditCandidate(inst.status)) auditQueue.push(id);
+  }
+  processAuditQueue();
+  res.json({ ok: true, queued: auditQueue.length, active: activeAudits });
+});
+
 app.post('/api/audit/:id/start', async (req, res) => {
   const inst = instances.get(req.params.id);
   if (!inst) return res.status(404).json({ error: 'Not found' });
   if (!CONFIG.auditPrompt) return res.status(400).json({ error: 'Audit prompt not set' });
-
-  if (inst.status !== 'ready') {
-    return res.status(400).json({ error: `Instance is ${inst.status}, not ready` });
-  }
-
+  if (inst.status !== 'ready') return res.status(400).json({ error: `Instance is ${inst.status}` });
   activeAudits++;
   await runAuditForInstance(req.params.id);
   res.json({ ok: true });
 });
 
-// Abort audit
 app.post('/api/audit/:id/abort', async (req, res) => {
   const inst = instances.get(req.params.id);
   if (!inst) return res.status(404).json({ error: 'Not found' });
-  if (!inst.sessionId) return res.status(400).json({ error: 'No active session' });
-
   try {
-    await ocFetch(globalServer.port, sessionPath(inst.sessionId, '/abort'), { method: 'POST' });
+    await tmux.sendKeys(tmux.sessionName(req.params.id), 'C-c');
     inst.status = 'ready';
     broadcast('instance.update', getInstanceSummary(inst));
     res.json({ ok: true });
@@ -862,178 +451,52 @@ app.post('/api/audit/:id/abort', async (req, res) => {
   }
 });
 
-// ─── Proxy Routes (interact with specific opencode instance) ────────────────
-
-app.get('/api/instances/:id/sessions', async (req, res) => {
-  if (globalServer.status !== 'ready') return res.status(502).json({ error: 'Global server offline' });
-  try {
-    const r = await ocFetch(globalServer.port, '/session');
-    res.json(r.data);
-  } catch (err) {
-    res.status(502).json({ error: err.message });
-  }
-});
-
-app.get('/api/instances/:id/messages/:sessionId', async (req, res) => {
+// Shortcut for abort from frontend
+app.post('/api/instances/:id/abort', async (req, res) => {
   const inst = instances.get(req.params.id);
   if (!inst) return res.status(404).json({ error: 'Not found' });
-  if (globalServer.status !== 'ready') return res.status(502).json({ error: 'Global server offline' });
   try {
-    const r = await ocFetch(globalServer.port, sessionPath(req.params.sessionId, '/message'));
-    res.json(r.data);
-  } catch (err) {
-    res.status(502).json({ error: err.message });
-  }
-});
-
-app.post('/api/instances/:id/message/:sessionId', async (req, res) => {
-  const inst = instances.get(req.params.id);
-  if (!inst) return res.status(404).json({ error: 'Not found' });
-  if (globalServer.status !== 'ready') return res.status(502).json({ error: 'Global server offline' });
-  try {
-    const r = await ocFetch(globalServer.port, sessionPath(req.params.sessionId, '/message'), {
-      method: 'POST',
-      body: req.body,
-    });
-    res.json(r.data);
-  } catch (err) {
-    res.status(502).json({ error: err.message });
-  }
-});
-
-app.post('/api/instances/:id/prompt/:sessionId', async (req, res) => {
-  const inst = instances.get(req.params.id);
-  if (!inst) return res.status(404).json({ error: 'Not found' });
-  if (globalServer.status !== 'ready') return res.status(502).json({ error: 'Global server offline' });
-  try {
-    await ocFetch(globalServer.port, sessionPath(req.params.sessionId, '/prompt_async'), {
-      method: 'POST',
-      body: withTargetDirectoryContext(req.body, inst),
-    });
-    
-    // Explicitly transition to auditing and start the official robust poll completion checker
-    if (inst.status !== 'auditing') {
-      inst.status = 'auditing';
-      broadcast('instance.update', getInstanceSummary(inst));
-      pollAuditCompletion(inst.id, req.params.sessionId);
-    }
-    
+    await tmux.sendKeys(tmux.sessionName(req.params.id), 'C-c');
+    inst.status = 'ready';
+    broadcast('instance.update', getInstanceSummary(inst));
     res.json({ ok: true });
   } catch (err) {
-    res.status(502).json({ error: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/api/instances/:id/session-status', async (req, res) => {
-  if (globalServer.status !== 'ready') return res.status(502).json({ error: 'Global server offline' });
+// ─── Shutdown ────────────────────────────────────────────────────────────────
+
+async function shutdown() {
+  console.log('\n[SYSTEM] Shutting down...');
+  for (const [id] of instances) {
+    try { await tmux.killSession(tmux.sessionName(id)); } catch {}
+  }
   try {
-    const r = await ocFetch(globalServer.port, '/session/status');
-    res.json(r.data);
-  } catch (err) {
-    res.status(502).json({ error: err.message });
-  }
-});
-
-app.post('/api/instances/:id/abort/:sessionId', async (req, res) => {
-  const inst = instances.get(req.params.id);
-  if (!inst) return res.status(404).json({ error: 'Not found' });
-  if (globalServer.status !== 'ready') return res.status(502).json({ error: 'Global server offline' });
-  try {
-    const r = await ocFetch(globalServer.port, sessionPath(req.params.sessionId, '/abort'), { method: 'POST' });
-    res.json(r.data);
-  } catch (err) {
-    res.status(502).json({ error: err.message });
-  }
-});
-
-app.post('/api/instances/:id/session', async (req, res) => {
-  const inst = instances.get(req.params.id);
-  if (!inst) return res.status(404).json({ error: 'Not found' });
-  if (globalServer.status !== 'ready') return res.status(502).json({ error: 'Global server offline' });
-  
-  try {
-    const r = await ocFetch(globalServer.port, '/session', {
-      method: 'POST',
-      body: req.body || {},
-    });
-    inst.sessionId = r.data.id;
-    broadcast('instance.update', getInstanceSummary(inst));
-    res.json(r.data);
-  } catch (err) {
-    res.status(502).json({ error: err.message });
-  }
-});
-
-// ─── Periodic health check ──────────────────────────────────────────────────
-
-setInterval(async () => {
-  // Only check global server
-  if (globalServer.status === 'ready' || globalServer.status === 'starting') {
-    try {
-      const res = await ocFetch(globalServer.port, '/global/health');
-      if (res.status !== 200 || !res.data?.healthy) {
-        if (globalServer.status === 'ready') {
-          console.error('[SYSTEM] Global Server Health Check Failed');
-          globalServer.status = 'error';
-          // Mark all instances
-          for (const [name, inst] of instances) {
-            if (inst.status !== 'stopped' && inst.status !== 'completed') {
-              inst.status = 'error';
-              inst.error = 'Global server health check failed';
-              broadcast('instance.update', getInstanceSummary(inst));
-            }
-          }
-        }
-      }
-    } catch {
-       if (globalServer.status === 'ready') {
-          globalServer.status = 'error';
-          for (const [name, inst] of instances) {
-            if (inst.status !== 'stopped' && inst.status !== 'completed') {
-              inst.status = 'error';
-              inst.error = 'Global server unreachable';
-              broadcast('instance.update', getInstanceSummary(inst));
-            }
-          }
-       }
-    }
-  }
-
-  // Check queue
-  for (const name of [...auditQueue]) {
-    const inst = instances.get(name);
-    // if virtual instance is ready, it waits...
-  }
-  if (auditQueue.length > 0) {
-    processAuditQueue();
-  }
-}, 10000);
-
-// ─── Graceful shutdown ──────────────────────────────────────────────────────
-
-process.on('SIGINT', async () => {
-  console.log('\n[SYSTEM] Shutting down global server...');
-  if (globalServer.pid) {
-    try { 
-      await new Promise((resolve) => treeKill(globalServer.pid, 'SIGKILL', resolve)); 
-    } catch (err) { 
-      console.error(err); 
-    }
-  }
-  process.exit();
-});
-
-process.on('SIGTERM', async () => {
-  await stopGlobalServer();
+    const sessions = await tmux.listSessions();
+    for (const s of sessions) await tmux.killSession(s);
+  } catch {}
   process.exit(0);
-});
+}
 
-// ─── Start ──────────────────────────────────────────────────────────────────
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
+
+// ─── Startup ─────────────────────────────────────────────────────────────────
+
+const { execSync } = require('child_process');
+let tmuxAvailable = false;
+try { execSync('tmux -V', { stdio: 'ignore' }); tmuxAvailable = true; } catch {}
+
+const server = http.createServer(app);
+createTerminalWSServer(server);
 
 const PORT = CONFIG.backendPort;
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log(`\n  ╔══════════════════════════════════════════════════╗`);
-  console.log(`  ║   Multi-Agent Monitor (Single Server Mode)       ║`);
+  console.log(`  ║   Multi-Agent Monitor (CLI-based, no opencode serve) ║`);
   console.log(`  ║   http://localhost:${PORT}                          ║`);
+  console.log(`  ║   Terminals: tmux attach -t mam-<instance>       ║`);
+  console.log(`  ║   tmux: ${tmuxAvailable ? '✓' : '✗ NOT FOUND'}                                 ║`);
   console.log(`  ╚══════════════════════════════════════════════════╝\n`);
 });

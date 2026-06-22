@@ -548,6 +548,24 @@ html, body {
   color: var(--color-error);
 }
 
+.btn-terminal-popup {
+  width: 28px; height: 28px;
+  border-radius: var(--radius-sm);
+  background: rgba(56, 189, 248, 0.08);
+  border: 1px solid rgba(56, 189, 248, 0.15);
+  color: var(--accent-primary);
+  font-size: 0.85rem;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+  transition: all var(--transition-fast);
+}
+.btn-terminal-popup:hover {
+  background: rgba(56, 189, 248, 0.2);
+  border-color: rgba(56, 189, 248, 0.4);
+  transform: scale(1.1);
+}
+
 /* ─── Chat Panel (right) ────────────────────────────────────────────────── */
 
 .chat-panel {
