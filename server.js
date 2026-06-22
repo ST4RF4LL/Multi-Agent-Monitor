@@ -207,23 +207,22 @@ async function startInstance(id) {
     // Wait for serve inside tmux to become ready
     await ensureServeReady(inst);
     if (!inst.ocReady) {
-      throw new Error('OpenCode serve did not start in time');
+      throw new Error('OpenCode TUI server did not start in time');
     }
 
-    // Create session on this instance's server
-    const sessionRes = await ocFetch(inst.ocPort, '/session', {
-      method: 'POST',
-      body: { title: inst.name },
-    });
-
-    console.log(`[SESSION:${inst.name}] POST /session response:`, JSON.stringify(sessionRes.data).slice(0,200));
-
-    if (!sessionRes.data || !sessionRes.data.id) {
-      throw new Error(`Failed to create session: ${JSON.stringify(sessionRes.data)}`);
+    // Get the default session that the TUI started with
+    const sessionsRes = await ocFetch(inst.ocPort, '/session', { timeout: 10000 });
+    const sessions = sessionsRes.data || [];
+    if (!Array.isArray(sessions) || sessions.length === 0) {
+      throw new Error('No sessions found on TUI server');
     }
 
-    inst.sessionId = sessionRes.data.id;
-    console.log(`[SESSION:${inst.name}] sessionId set to: ${inst.sessionId}`);
+    // Use the most recent session (the one the TUI is showing)
+    const latestSession = sessions.reduce((a, b) =>
+      (a.time?.updated || 0) > (b.time?.updated || 0) ? a : b
+    );
+    inst.sessionId = latestSession.id;
+    console.log(`[SESSION:${inst.name}] Using TUI session: ${inst.sessionId}`);
     inst.status = 'ready';
     inst.startedAt = new Date().toISOString();
     broadcast('instance.update', getInstanceSummary(inst));
