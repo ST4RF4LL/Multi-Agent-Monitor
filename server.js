@@ -223,6 +223,15 @@ async function startInstance(id) {
     );
     inst.sessionId = latestSession.id;
     console.log(`[SESSION:${inst.name}] Using TUI session: ${inst.sessionId}`);
+
+    // Force TUI redraw so the session interface is rendered
+    try {
+      const sid = tmux.sessionName(inst.id);
+      const target = tmux.windowTarget(sid);
+      await tmux.exec(['send-keys', '-R', '-t', target, '-l', '']);
+      await tmux.sendKeys(sid, 'C-l');
+    } catch {}
+
     inst.status = 'ready';
     inst.startedAt = new Date().toISOString();
     broadcast('instance.update', getInstanceSummary(inst));
@@ -274,6 +283,14 @@ async function runAuditForInstance(id) {
       method: 'POST',
       body: promptBody,
     });
+
+    // Force TUI in tmux to redraw so the session conversation is visible
+    try {
+      const sid = tmux.sessionName(id);
+      const target = tmux.windowTarget(sid);
+      await tmux.exec(['send-keys', '-R', '-t', target, '-l', '']);
+      await tmux.sendKeys(sid, 'C-l');
+    } catch {}
 
     scheduleAuditTimeout(id);
   } catch (err) {
