@@ -100,7 +100,7 @@ const App = (() => {
       <div class="instance-icon">📦</div>
       <div class="instance-info">
         <div class="instance-name" title="${escapeHtml(inst.dir||inst.name)}">${escapeHtml(inst.name)}</div>
-        <div class="instance-detail">${inst.sessionId ? `<span style="color:var(--text-muted);font-family:monospace;font-size:0.65rem;">sid: ${escapeHtml(inst.sessionId.slice(-8))}</span>` : '<span>serving</span>'}</div>
+        <div class="instance-detail">${inst.sessionId ? `<span style="color:var(--text-muted);font-family:monospace;font-size:0.6rem;" title="${escapeHtml(inst.sessionId)}">sid: ${escapeHtml(inst.sessionId)}</span>` : `<span style="color:var(--text-muted);font-size:0.7rem;">:${inst.ocPort||'?'}</span>`}</div>
       </div>
       <button class="btn-terminal-popup" title="弹出独立终端窗口" onclick="event.stopPropagation();App.openTerminalPopup('${escapeHtml(key)}')">🖥</button>
       <div class="instance-status-badge" data-status="${inst.status}">
