@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════════════
-// Multi-Agent Monitor — Frontend (CLI-based, terminal via popup)
+// Multi-Agent Monitor — Frontend (opencode serve / session-based)
 // ═══════════════════════════════════════════════════════════════════════
 
 const App = (() => {
@@ -7,8 +7,8 @@ const App = (() => {
   let selectedInstance = null;
   let eventSource = null;
   let pollTimer = null;
-  let termTimer = null;
-  let lastTermLength = 0;
+  let msgTimer = null;
+  let seenMsgIds = new Set();
   let totalInstances = 0;
   let currentModel = '';
 
@@ -65,6 +65,7 @@ const App = (() => {
     });
     eventSource.addEventListener('instances.reset', (e) => {
       instances = JSON.parse(e.data); totalInstances = instances.length;
+      seenMsgIds = new Set();
       renderList(); renderStats();
     });
     eventSource.addEventListener('audit.queue', (e) => updateQueue(JSON.parse(e.data)));
@@ -99,9 +100,8 @@ const App = (() => {
       <div class="instance-icon">📦</div>
       <div class="instance-info">
         <div class="instance-name" title="${escapeHtml(inst.dir||inst.name)}">${escapeHtml(inst.name)}</div>
-        <div class="instance-detail">${inst.error ? `<span style="color:var(--accent-red)" title="${escapeHtml(inst.error)}">⚠ ${escapeHtml(inst.error.substring(0,40))}</span>` : '<span>tmux 终端</span>'}</div>
+        <div class="instance-detail">${inst.error ? `<span style="color:var(--accent-red)" title="${escapeHtml(inst.error)}">⚠ ${escapeHtml(inst.error.substring(0,40))}</span>` : '<span>session 模式</span>'}</div>
       </div>
-      <button class="btn-terminal-popup" title="弹出独立终端窗口" onclick="event.stopPropagation();App.openTerminalPopup('${escapeHtml(key)}')">🖥</button>
       <div class="instance-status-badge" data-status="${inst.status}">
         ${inst.status==='auditing'?'<span class="spinner spinner-sm"></span>':''}${labels[inst.status]||inst.status}
       </div>`;
@@ -131,14 +131,8 @@ const App = (() => {
     if (data.active===0 && data.queued===0 && !data.paused) { bar.classList.add('hidden'); pauseBtn.classList.add('hidden'); resumeBtn.classList.add('hidden'); return; }
     bar.classList.remove('hidden');
 
-    // Toggle pause/resume buttons
-    if (data.paused) {
-      pauseBtn.classList.add('hidden');
-      resumeBtn.classList.remove('hidden');
-    } else {
-      pauseBtn.classList.remove('hidden');
-      resumeBtn.classList.add('hidden');
-    }
+    if (data.paused) { pauseBtn.classList.add('hidden'); resumeBtn.classList.remove('hidden'); }
+    else { pauseBtn.classList.remove('hidden'); resumeBtn.classList.add('hidden'); }
 
     $('queue-text').textContent = `${data.paused ? '⏸ 已暂停 | ' : ''}并发: ${data.active}/${data.max} | 队列: ${data.queued}`;
     $('queue-fill').style.width = total>0 ? `${Math.round(done/total*100)}%` : '0%';
@@ -150,7 +144,7 @@ const App = (() => {
   function selectInstance(key) {
     const inst = instances.find(i => instanceKey(i) === key); if (!inst) return;
     selectedInstance = inst;
-    lastTermLength = 0;
+    seenMsgIds = new Set();
     document.querySelectorAll('.instance-card').forEach(c => c.classList.remove('selected'));
     const card = $(cardId(key)); if (card) card.classList.add('selected');
     $('chat-empty').style.display = 'none';
@@ -158,7 +152,7 @@ const App = (() => {
     $('chat-messages').innerHTML = '';
     updateHeader();
     const s = $('instance-model-select'); if (s) s.value = inst.model || '';
-    startTermPoll();
+    startMsgPoll();
   }
 
   function updateHeader() {
@@ -177,7 +171,7 @@ const App = (() => {
     input.value = ''; autoResize();
     try {
       await api(instPath(selectedInstance, '/send'), { method: 'POST', body: { text } });
-      toast('已发送到终端', 'success');
+      toast('已发送', 'success');
     } catch (err) { toast('发送失败: ' + err.message, 'error'); }
   }
 
@@ -186,49 +180,40 @@ const App = (() => {
 
   async function abortAudit() {
     if (!selectedInstance) return;
-    try { await api(instPath(selectedInstance, '/abort'), { method:'POST' }); toast('已发送中止信号', 'info'); }
+    try { await api(instPath(selectedInstance, '/abort'), { method:'POST' }); toast('已中止', 'info'); }
     catch (err) { toast('中止失败: '+err.message, 'error'); }
   }
 
-  // ─── Terminal Poll ──────────────────────────────────────────────────
+  // ─── Message Poll ───────────────────────────────────────────────────
 
-  function startTermPoll() {
-    stopTermPoll();
-    pollTerminal();
-    termTimer = setInterval(pollTerminal, 2000);
+  function startMsgPoll() {
+    stopMsgPoll();
+    pollMessages();
+    msgTimer = setInterval(pollMessages, 2000);
   }
 
-  function stopTermPoll() {
-    if (termTimer) { clearInterval(termTimer); termTimer = null; }
+  function stopMsgPoll() {
+    if (msgTimer) { clearInterval(msgTimer); msgTimer = null; }
   }
 
-  async function pollTerminal() {
+  async function pollMessages() {
     if (!selectedInstance) return;
     try {
-      const data = await api(instPath(selectedInstance, '/terminal'));
-      const text = data.text || '';
-      if (!text) return;
+      const data = await api(instPath(selectedInstance, '/messages'));
+      if (!data.messages) return;
       const msgs = $('chat-messages');
-      if (text.length < lastTermLength) {
-        // Pane was cleared or reset — show fresh
-        msgs.innerHTML = '';
-        lastTermLength = 0;
+      let newContent = false;
+      for (const m of data.messages) {
+        if (!m.id || seenMsgIds.has(m.id)) continue;
+        seenMsgIds.add(m.id);
+        newContent = true;
+        const div = document.createElement('div');
+        div.className = `message ${m.role === 'user' ? 'user' : 'assistant'}`;
+        div.innerHTML = `<div class="message-bubble">${escapeHtml(m.text).replace(/\n/g, '<br>')}</div>`;
+        msgs.appendChild(div);
       }
-      if (text.length <= lastTermLength) return;
-      const newText = text.slice(lastTermLength);
-      lastTermLength = text.length;
-      const div = document.createElement('div');
-      div.className = 'chat-line';
-      div.textContent = newText;
-      msgs.appendChild(div);
-      msgs.scrollTop = msgs.scrollHeight;
+      if (newContent) msgs.scrollTop = msgs.scrollHeight;
     } catch {}
-  }
-
-  function openTerminalPopup(key) {
-    const w = 1100, h = 700;
-    window.open('/terminal/'+encodeURIComponent(key), 'term-'+key,
-      `width=${w},height=${h},left=${Math.max(0,(screen.width-w)/2)},top=${Math.max(0,(screen.height-h)/2)}`);
   }
 
   // ─── Launch ─────────────────────────────────────────────────────────
@@ -258,7 +243,7 @@ const App = (() => {
   function backToSetup() {
     $('setup-screen').style.display='flex'; $('monitor-screen').style.display='none';
     if (eventSource) eventSource.close(); if (pollTimer) clearInterval(pollTimer);
-    stopTermPoll();
+    stopMsgPoll();
     selectedInstance = null;
   }
 
@@ -307,7 +292,6 @@ const App = (() => {
   function toggleSettings() {
     const overlay = $('settings-overlay');
     if (overlay.classList.contains('hidden')) {
-      // Populate current values
       api('/api/config').then(cfg => {
         $('settings-audit-prompt').value = cfg.auditPrompt || '';
         $('settings-max-concurrent').value = cfg.maxConcurrent || 3;
@@ -361,5 +345,5 @@ const App = (() => {
     } catch {}
   });
 
-  return { launch, backToSetup, startBatchAudit, pauseAudit, resumeAudit, stopAllInstances, sendMessage, onChatKeyDown, abortAudit, selectInstance, setGlobalModel, setInstanceModel, openTerminalPopup, toggleSettings, saveSettings };
+  return { launch, backToSetup, startBatchAudit, pauseAudit, resumeAudit, stopAllInstances, sendMessage, onChatKeyDown, abortAudit, selectInstance, setGlobalModel, setInstanceModel, toggleSettings, saveSettings };
 })();

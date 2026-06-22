@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Multi-Agent Monitor</title>
-    <meta name="description" content="Web-based monitor for orchestrating multiple OpenCode instances via tmux" />
+    <meta name="description" content="Web-based monitor for orchestrating multiple OpenCode instances via opencode serve" />
     <link rel="stylesheet" href="index.css" />
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔮</text></svg>" />
   </head>
@@ -15,7 +15,7 @@
         <div class="setup-container">
           <div class="setup-logo">
             <h1>🔮 Multi-Agent Monitor</h1>
-            <p>OpenCode 多实例并行审计监控器 (CLI / tmux)</p>
+            <p>OpenCode 多实例并行审计监控器</p>
           </div>
           <div class="setup-card">
             <div class="form-group">
@@ -135,7 +135,7 @@
 
               <div class="chat-messages" id="chat-messages">
                 <div style="text-align:center;color:var(--text-muted);padding:2rem;">
-                  <p>📝 在此输入消息，将通过 tmux 发送到对应实例的 CLI 终端</p>
+                  <p>📝 在此输入消息，选中实例后发送到对应 session</p>
                 </div>
               </div>
 
