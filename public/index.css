@@ -1185,3 +1185,29 @@ html, body {
 .settings-body .btn-full {
   margin-top: 0.5rem;
 }
+
+/* ─── History List ───────────────────────────────────────────────────────── */
+
+.history-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  margin-bottom: 0.35rem;
+  background: var(--bg-tertiary);
+}
+
+.history-name {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.history-meta {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  margin-top: 0.15rem;
+}

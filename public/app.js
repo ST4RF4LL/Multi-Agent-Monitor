@@ -306,6 +306,81 @@ const App = (() => {
     }
   }
 
+  // ─── History ─────────────────────────────────────────────────────────
+
+  async function toggleHistory() {
+    const overlay = $('history-overlay');
+    if (overlay.classList.contains('hidden')) {
+      overlay.classList.remove('hidden');
+      await loadHistoryList();
+    } else {
+      overlay.classList.add('hidden');
+    }
+  }
+
+  async function saveHistory() {
+    try {
+      const result = await api('/api/history/save', { method: 'POST' });
+      toast(`已保存: ${result.name}`, 'success');
+      await loadHistoryList();
+    } catch (err) {
+      toast('保存失败: ' + err.message, 'error');
+    }
+  }
+
+  async function loadHistoryList() {
+    try {
+      const data = await api('/api/history/list');
+      const list = $('history-list');
+      if (!data.history || !data.history.length) {
+        list.innerHTML = '<p style="color:var(--text-muted);text-align:center;padding:1rem;">暂无历史记录</p>';
+        return;
+      }
+      list.innerHTML = data.history.map(h => {
+        const d = h.savedAt ? new Date(h.savedAt).toLocaleString() : '未知';
+        const status = [];
+        if (h.completed) status.push(`✅${h.completed}`);
+        if (h.auditing) status.push(`🔍${h.auditing}`);
+        if (h.error) status.push(`❌${h.error}`);
+        return `<div class="history-item">
+          <div>
+            <div class="history-name" title="${escapeHtml(h.name)}">${escapeHtml(h.name.replace(/^mam-|\.json$/g,''))}</div>
+            <div class="history-meta">${d} · ${h.total}个项目 ${status.join(' ')}</div>
+          </div>
+          <div style="display:flex;gap:0.35rem;">
+            <button class="btn btn-ghost btn-sm" onclick="App.loadHistory('${escapeHtml(h.name)}')">📂 加载</button>
+            <button class="btn btn-danger btn-sm" onclick="App.deleteHistory('${escapeHtml(h.name)}')">🗑</button>
+          </div>
+        </div>`;
+      }).join('');
+    } catch {}
+  }
+
+  async function loadHistory(name) {
+    try {
+      await api(`/api/history/load/${encodeURIComponent(name)}`, { method: 'POST' });
+      toast('历史任务已加载', 'success');
+      $('history-overlay').classList.add('hidden');
+      instances = await api('/api/instances');
+      totalInstances = instances.length;
+      renderList(); renderStats();
+      seenMsgIds = new Set();
+    } catch (err) {
+      toast('加载失败: ' + err.message, 'error');
+    }
+  }
+
+  async function deleteHistory(name) {
+    if (!confirm(`删除 ${name}？`)) return;
+    try {
+      await api(`/api/history/${encodeURIComponent(name)}`, { method: 'DELETE' });
+      toast('已删除', 'success');
+      await loadHistoryList();
+    } catch (err) {
+      toast('删除失败: ' + err.message, 'error');
+    }
+  }
+
   // ─── Popup Terminal ─────────────────────────────────────────────────
 
   function openTerminalPopup(key) {
@@ -372,5 +447,5 @@ const App = (() => {
     } catch {}
   });
 
-  return { launch, backToSetup, startBatchAudit, pauseAudit, resumeAudit, stopAllInstances, sendMessage, onChatKeyDown, abortAudit, selectInstance, setGlobalModel, setInstanceModel, openTerminalPopup, toggleSettings, saveSettings, toggleAutoRefresh };
+  return { launch, backToSetup, startBatchAudit, pauseAudit, resumeAudit, stopAllInstances, sendMessage, onChatKeyDown, abortAudit, selectInstance, setGlobalModel, setInstanceModel, openTerminalPopup, toggleSettings, saveSettings, toggleAutoRefresh, toggleHistory, saveHistory, loadHistoryList, loadHistory, deleteHistory };
 })();

@@ -5,6 +5,8 @@ const http = require('http');
 const tmux = require('./lib/tmux-manager');
 const createTerminalWSServer = require('./lib/terminal-ws');
 
+const MAM_DIR = path.join(process.env.HOME || process.env.USERPROFILE || '~', '.mam');
+
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -623,6 +625,139 @@ app.post('/api/audit/resume', (req, res) => {
 app.get('/api/audit/status', (req, res) => {
   res.json({ queued: auditQueue.length, active: activeAudits, max: CONFIG.maxConcurrent, paused: auditPaused });
 });
+
+// ─── History / Persistence ───────────────────────────────────────────────────
+
+function ensureMamDir() {
+  if (!fs.existsSync(MAM_DIR)) fs.mkdirSync(MAM_DIR, { recursive: true });
+}
+
+function makeHistoryFileName() {
+  const now = new Date();
+  const ts = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const project = (CONFIG.projectRoot || 'unknown').split('/').filter(Boolean).pop() || 'unknown';
+  return `mam-${ts}-${project}.json`;
+}
+
+function buildHistorySnapshot() {
+  const counts = {};
+  for (const [, inst] of instances) {
+    counts[inst.status] = (counts[inst.status] || 0) + 1;
+  }
+  return {
+    savedAt: new Date().toISOString(),
+    config: { ...CONFIG },
+    instances: [...instances.values()].map(getInstanceSummary),
+    stats: { total: instances.size, ...counts },
+  };
+}
+
+app.post('/api/history/save', (req, res) => {
+  try {
+    ensureMamDir();
+    const name = req.body.name || makeHistoryFileName();
+    const filePath = path.join(MAM_DIR, name);
+    const snapshot = buildHistorySnapshot();
+    fs.writeFileSync(filePath, JSON.stringify(snapshot, null, 2));
+    console.log(`[HISTORY] Saved: ${name}`);
+    res.json({ ok: true, name, path: filePath });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/history/list', (req, res) => {
+  try {
+    ensureMamDir();
+    const files = fs.readdirSync(MAM_DIR)
+      .filter(f => f.startsWith('mam-') && f.endsWith('.json'))
+      .sort()
+      .reverse();
+    const list = files.map(f => {
+      try {
+        const data = JSON.parse(fs.readFileSync(path.join(MAM_DIR, f), 'utf8'));
+        return {
+          name: f,
+          savedAt: data.savedAt,
+          projectRoot: data.config?.projectRoot || '',
+          total: data.stats?.total || 0,
+          completed: data.stats?.completed || 0,
+          auditing: data.stats?.auditing || 0,
+          error: data.stats?.error || 0,
+        };
+      } catch { return { name: f, savedAt: null, error: 'corrupted' }; }
+    });
+    res.json({ history: list });
+  } catch (err) {
+    res.json({ history: [] });
+  }
+});
+
+app.post('/api/history/load/:name', (req, res) => {
+  try {
+    const filePath = path.join(MAM_DIR, req.params.name);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Not found' });
+    const snapshot = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    // Stop current instances
+    for (const [id] of instances) {
+      stopInstance(id).catch(() => {});
+    }
+    instances.clear();
+    // Restore config
+    if (snapshot.config) {
+      CONFIG.openCodeRoot = snapshot.config.openCodeRoot || CONFIG.openCodeRoot;
+      CONFIG.projectRoot = snapshot.config.projectRoot || CONFIG.projectRoot;
+      CONFIG.auditPrompt = snapshot.config.auditPrompt || CONFIG.auditPrompt;
+      CONFIG.maxConcurrent = snapshot.config.maxConcurrent || CONFIG.maxConcurrent;
+      CONFIG.model = snapshot.config.model || CONFIG.model;
+    }
+    // Restore instances
+    if (Array.isArray(snapshot.instances)) {
+      snapshot.instances.forEach(i => {
+        instances.set(i.id, {
+          ...i,
+          status: i.status === 'auditing' ? 'stopped' : (i.status || 'stopped'),
+          sessionId: null,
+          ocPort: i.ocPort || null,
+          ocReady: false,
+          error: null,
+        });
+      });
+    }
+    broadcast('instances.reset', [...instances.values()].map(getInstanceSummary));
+    res.json({ ok: true, config: CONFIG, count: instances.size });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/history/:name', (req, res) => {
+  try {
+    const filePath = path.join(MAM_DIR, req.params.name);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Not found' });
+    fs.unlinkSync(filePath);
+    console.log(`[HISTORY] Deleted: ${req.params.name}`);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Auto-save after each audit completion
+const origOnAuditFinished = onAuditFinished;
+onAuditFinished = function(id) {
+  origOnAuditFinished(id);
+  // Auto-save when all audits done
+  const allDone = [...instances.values()].every(i => i.status === 'completed' || i.status === 'error' || i.status === 'stopped');
+  if (allDone && instances.size > 0) {
+    try {
+      ensureMamDir();
+      const name = makeHistoryFileName();
+      fs.writeFileSync(path.join(MAM_DIR, name), JSON.stringify(buildHistorySnapshot(), null, 2));
+      console.log(`[HISTORY] Auto-saved: ${name}`);
+    } catch {}
+  }
+};
 
 // ─── Shutdown ────────────────────────────────────────────────────────────────
 

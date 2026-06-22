@@ -68,6 +68,7 @@
             <button class="btn btn-pause btn-sm hidden" id="btn-pause" onclick="App.pauseAudit()">⏸ 暂停</button>
             <button class="btn btn-resume btn-sm hidden" id="btn-resume" onclick="App.resumeAudit()">▶ 继续</button>
             <button class="btn btn-ghost btn-sm" onclick="App.stopAllInstances()">停止全部</button>
+            <button class="btn btn-ghost btn-sm" onclick="App.toggleHistory()">📋 历史</button>
             <button class="btn btn-ghost btn-sm" onclick="App.toggleSettings()">⚙ 设置</button>
           </div>
         </div>
@@ -102,6 +103,25 @@
                 </div>
               </div>
               <button class="btn btn-primary btn-sm btn-full" onclick="App.saveSettings()">💾 保存设置</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- History overlay -->
+        <div class="settings-overlay hidden" id="history-overlay">
+          <div class="settings-panel" style="max-width:600px;">
+            <div class="settings-header">
+              <h3>📋 历史任务</h3>
+              <button class="btn btn-ghost btn-sm" onclick="App.toggleHistory()">✕ 关闭</button>
+            </div>
+            <div class="settings-body">
+              <div style="margin-bottom:0.75rem;display:flex;gap:0.5rem;">
+                <button class="btn btn-primary btn-sm" onclick="App.saveHistory()">💾 保存当前</button>
+                <button class="btn btn-ghost btn-sm" onclick="App.loadHistoryList()">🔄 刷新列表</button>
+              </div>
+              <div id="history-list" style="max-height:50vh;overflow-y:auto;">
+                <p style="color:var(--text-muted);text-align:center;">加载中...</p>
+              </div>
             </div>
           </div>
         </div>
