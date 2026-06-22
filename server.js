@@ -199,7 +199,10 @@ async function startInstance(id) {
     await tmux.createSessionWithEnv(inst.id,
       `opencode serve --port ${inst.ocPort} --hostname 127.0.0.1`,
       inst.dir, env, { cols: 160, rows: 40 });
-    console.log(`[TMUX] mam-${inst.id} created for ${inst.name}`);
+
+    // Verify tmux session exists
+    const tmuxExists = await tmux.hasSession(tmux.sessionName(inst.id));
+    console.log(`[TMUX] mam-${inst.id} created (exists: ${tmuxExists}), cmd: opencode serve --port ${inst.ocPort}`);
 
     // Wait for serve inside tmux to become ready
     await ensureServeReady(inst);
@@ -358,6 +361,16 @@ app.post('/api/config', (req, res) => {
 });
 
 app.get('/api/config', (req, res) => res.json(CONFIG));
+
+// Diagnostic: check tmux status
+app.get('/api/diag/tmux', async (req, res) => {
+  try {
+    const sessions = await tmux.listSessions();
+    res.json({ sessions, expected: [...instances.keys()].map(id => tmux.sessionName(id)) });
+  } catch (err) {
+    res.json({ error: err.message });
+  }
+});
 
 // Terminal popup — xterm.js WebSocket
 app.get('/terminal/:id', (req, res) => {
