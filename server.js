@@ -197,12 +197,12 @@ async function startInstance(id) {
     const env = { ...process.env };
     if (openCodeRoot && openCodeRoot !== inst.dir) env.OPENCODE_ROOT = openCodeRoot;
     await tmux.createSessionWithEnv(inst.id,
-      `opencode serve --port ${inst.ocPort} --hostname 127.0.0.1`,
+      `opencode --port ${inst.ocPort} --hostname 127.0.0.1`,
       inst.dir, env, { cols: 160, rows: 40 });
 
     // Verify tmux session exists
     const tmuxExists = await tmux.hasSession(tmux.sessionName(inst.id));
-    console.log(`[TMUX] mam-${inst.id} created (exists: ${tmuxExists}), cmd: opencode serve --port ${inst.ocPort}`);
+    console.log(`[TMUX] mam-${inst.id} created (exists: ${tmuxExists}), cmd: opencode --port ${inst.ocPort}`);
 
     // Wait for serve inside tmux to become ready
     await ensureServeReady(inst);
@@ -642,7 +642,7 @@ createTerminalWSServer(server);
 const PORT = CONFIG.backendPort;
 server.listen(PORT, () => {
   console.log(`\n  ╔══════════════════════════════════════════════════╗`);
-  console.log(`  ║   Multi-Agent Monitor (opencode serve + tmux)  ║`);
+  console.log(`  ║   Multi-Agent Monitor (opencode TUI + API)      ║`);
   console.log(`  ║   http://localhost:${PORT}                          ║`);
   console.log(`  ║   OC ports: ${CONFIG.ocPortStart}+                       ║`);
   console.log(`  ║   tmux: tmux attach -t mam-<instance>           ║`);
