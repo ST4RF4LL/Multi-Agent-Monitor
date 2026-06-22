@@ -1,5 +1,4 @@
 const express = require('express');
-const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
@@ -132,74 +131,26 @@ function getInstanceSummary(inst) {
 
 // ─── Instance serve management ───────────────────────────────────────────────
 
-function startInstanceServe(inst) {
-  return new Promise(async (resolve) => {
-    // Check if already running
-    if (inst.ocProcess && inst.ocReady) return resolve();
-
-    // Kill any previous process
-    if (inst.ocProcess) {
-      try { process.kill(inst.ocPID, 'SIGTERM'); } catch {}
-      inst.ocProcess = null;
-      inst.ocPID = null;
-    }
-
-    const openCodeRoot = getOpenCodeRoot();
-    inst.ocReady = false;
-
-    console.log(`[OC:${inst.name}] Starting opencode serve on port ${inst.ocPort} in ${inst.dir}`);
-
-    const proc = spawn('opencode', ['serve', '--port', String(inst.ocPort), '--hostname', '127.0.0.1'], {
-      cwd: inst.dir,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, ...(openCodeRoot && openCodeRoot !== inst.dir ? { OPENCODE_ROOT: openCodeRoot } : {}) },
-    });
-
-    inst.ocProcess = proc;
-    inst.ocPID = proc.pid;
-
-    proc.stderr.on('data', (d) => {
-      const line = d.toString().trim();
-      if (line) console.log(`[OC:${inst.name}] ${line}`);
-    });
-
-    proc.on('error', (err) => {
-      console.error(`[OC:${inst.name}] Process error: ${err.message}`);
-      inst.ocProcess = null;
-      inst.ocPID = null;
-    });
-
-    proc.on('close', (code) => {
-      console.log(`[OC:${inst.name}] Exit (${code})`);
-      inst.ocProcess = null;
-      inst.ocPID = null;
-      inst.ocReady = false;
-    });
-
-    // Wait for health check
-    for (let i = 0; i < 30; i++) {
-      await new Promise(r => setTimeout(r, 1000));
-      try {
-        const res = await ocFetch(inst.ocPort, '/global/health', { timeout: 3000 });
-        if (res.status === 200 && res.data && res.data.healthy) {
-          inst.ocReady = true;
-          console.log(`[OC:${inst.name}] Ready on :${inst.ocPort}`);
-          return resolve();
-        }
-      } catch {}
-    }
-
-    resolve(); // Don't fail - will retry on next access
-  });
+async function ensureServeReady(inst) {
+  // Health-check loop until serve inside tmux is ready
+  if (inst.ocReady) return;
+  for (let i = 0; i < 30; i++) {
+    await new Promise(r => setTimeout(r, 1000));
+    try {
+      const res = await ocFetch(inst.ocPort, '/global/health', { timeout: 3000 });
+      if (res.status === 200 && res.data && res.data.healthy) {
+        inst.ocReady = true;
+        console.log(`[OC:${inst.name}] Ready on :${inst.ocPort}`);
+        return;
+      }
+    } catch {}
+  }
+  console.warn(`[OC:${inst.name}] Health check timed out on :${inst.ocPort}`);
 }
 
 async function stopInstanceServe(inst) {
   inst.ocReady = false;
-  if (inst.ocPID) {
-    try { process.kill(inst.ocPID, 'SIGTERM'); } catch {}
-  }
-  inst.ocProcess = null;
-  inst.ocPID = null;
+  try { await tmux.killSession(tmux.sessionName(inst.id)); } catch {}
 }
 
 // ─── Status check loop ───────────────────────────────────────────────────────
@@ -241,26 +192,20 @@ async function startInstance(id) {
   broadcast('instance.update', getInstanceSummary(inst));
 
   try {
-    // Start per-instance opencode serve + tmux session
-    inst.ocPort = CONFIG.ocPortStart + [...instances.values()].filter(i => i.ocPort).length;
-    await startInstanceServe(inst);
-
-    // Create tmux session running opencode serve (visible logs in tmux)
+    // Create tmux session running opencode serve (port assigned in scan)
     const openCodeRoot = getOpenCodeRoot();
     const env = { ...process.env };
     if (openCodeRoot && openCodeRoot !== inst.dir) env.OPENCODE_ROOT = openCodeRoot;
-    try {
-      await tmux.createSessionWithEnv(inst.id,
-        `opencode serve --port ${inst.ocPort} --hostname 127.0.0.1`,
-        inst.dir, env, { cols: 160, rows: 40 });
-      console.log(`[TMUX] mam-${inst.id} created for ${inst.name}`);
-    } catch (terr) {
-      console.warn(`[TMUX] Failed for ${inst.name}: ${terr.message}`);
-    }
+    await tmux.createSessionWithEnv(inst.id,
+      `opencode serve --port ${inst.ocPort} --hostname 127.0.0.1`,
+      inst.dir, env, { cols: 160, rows: 40 });
+    console.log(`[TMUX] mam-${inst.id} created for ${inst.name}`);
 
-    // Wait a moment for serve to be ready then create session
-    await new Promise(r => setTimeout(r, 2000));
-    if (!inst.ocReady) await startInstanceServe(inst);
+    // Wait for serve inside tmux to become ready
+    await ensureServeReady(inst);
+    if (!inst.ocReady) {
+      throw new Error('OpenCode serve did not start in time');
+    }
 
     // Create session on this instance's server
     const sessionRes = await ocFetch(inst.ocPort, '/session', {
@@ -426,12 +371,14 @@ app.post('/api/scan', (req, res) => {
 
   const projects = discoverGitProjects(root);
   let portIdx = 0;
-  projects.forEach(p => instances.set(p.id, {
+  projects.forEach(p => {
+    const port = CONFIG.ocPortStart + (portIdx++);
+    instances.set(p.id, {
     id: p.id, name: p.name, relDir: p.relDir, dir: p.dir,
-    status: 'stopped', error: null, sessionId: null, ocPort: CONFIG.ocPortStart + (portIdx++),
-    ocProcess: null, ocPID: null, ocReady: false,
+    status: 'stopped', error: null, sessionId: null, ocPort: port, ocReady: false,
     startedAt: null, model: CONFIG.model || '',
-  }));
+    });
+  });
 
   const summaries = projects.map(p => getInstanceSummary(instances.get(p.id)));
   broadcast('instances.reset', summaries);
@@ -661,10 +608,6 @@ async function shutdown() {
     const sessions = await tmux.listSessions();
     for (const s of sessions) await tmux.killSession(s);
   } catch {}
-  for (const [, inst] of instances) {
-    if (inst.ocPID) { try { process.kill(inst.ocPID, 'SIGTERM'); } catch {} }
-  }
-  try { require('child_process').execSync("pkill -f 'opencode serve'", { stdio: 'ignore' }); } catch {}
   process.exit(0);
 }
 
