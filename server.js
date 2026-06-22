@@ -228,6 +228,8 @@ async function startInstance(id) {
     try {
       const sid = tmux.sessionName(inst.id);
       const target = tmux.windowTarget(sid);
+      await tmux.sendKeys(sid, 'Escape');
+      await new Promise(r => setTimeout(r, 100));
       await tmux.exec(['send-keys', '-R', '-t', target, '-l', '']);
       await tmux.sendKeys(sid, 'C-l');
     } catch {}
@@ -288,6 +290,8 @@ async function runAuditForInstance(id) {
     try {
       const sid = tmux.sessionName(id);
       const target = tmux.windowTarget(sid);
+      await tmux.sendKeys(sid, 'Escape');
+      await new Promise(r => setTimeout(r, 100));
       await tmux.exec(['send-keys', '-R', '-t', target, '-l', '']);
       await tmux.sendKeys(sid, 'C-l');
     } catch {}
