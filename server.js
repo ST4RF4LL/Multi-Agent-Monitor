@@ -161,21 +161,21 @@ function startStatusCheck() {
   if (statusCheckTimer) return;
   statusCheckTimer = setInterval(async () => {
     for (const [id, inst] of instances) {
-      if (inst.status === 'auditing' && inst.sessionId && inst.ocReady) {
-        try {
-          const res = await ocFetch(inst.ocPort, '/session/status', { timeout: 5000 });
-          if (res.data && res.data[inst.sessionId]) {
-            const st = res.data[inst.sessionId];
-            // Check if session is idle (completed) or error
-            if (st === 'idle' || st === 'error') {
-              console.log(`[STATUS] ${inst.name} session idle/error → completed`);
-              inst.status = 'completed';
-              broadcast('instance.update', getInstanceSummary(inst));
-              onAuditFinished(id);
-            }
+      if (inst.status !== 'auditing' || !inst.sessionId || !inst.ocReady) continue;
+      try {
+        // Check session messages for completion (finish: "stop" on last assistant message)
+        const res = await ocFetch(inst.ocPort, `/session/${inst.sessionId}/message`, { timeout: 5000 });
+        if (res.data && Array.isArray(res.data) && res.data.length > 0) {
+          const last = res.data[res.data.length - 1];
+          const info = last.info || last;
+          if (info.role === 'assistant' && (info.finish === 'stop' || info.time?.completed)) {
+            console.log(`[STATUS] ${inst.name} assistant finished → completed`);
+            inst.status = 'completed';
+            broadcast('instance.update', getInstanceSummary(inst));
+            onAuditFinished(id);
           }
-        } catch {}
-      }
+        }
+      } catch {}
     }
   }, 3000);
 }
