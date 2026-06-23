@@ -134,7 +134,6 @@ function getInstanceSummary(inst) {
 // ─── Instance serve management ───────────────────────────────────────────────
 
 async function ensureServeReady(inst) {
-  // Health-check loop until serve inside tmux is ready
   if (inst.ocReady) return;
   for (let i = 0; i < 30; i++) {
     await new Promise(r => setTimeout(r, 1000));
@@ -145,9 +144,12 @@ async function ensureServeReady(inst) {
         console.log(`[OC:${inst.name}] Ready on :${inst.ocPort}`);
         return;
       }
-    } catch {}
+      console.log(`[OC:${inst.name}] Health check attempt ${i+1}: status=${res.status}, data=${JSON.stringify(res.data).slice(0,100)}`);
+    } catch (e) {
+      console.log(`[OC:${inst.name}] Health check attempt ${i+1}: error=${e.message}`);
+    }
   }
-  console.warn(`[OC:${inst.name}] Health check timed out on :${inst.ocPort}`);
+  console.warn(`[OC:${inst.name}] Health check FAILED after 30 attempts on :${inst.ocPort}`);
 }
 
 async function stopInstanceServe(inst) {
@@ -212,7 +214,7 @@ async function startInstance(id) {
       throw new Error('OpenCode TUI server did not start in time');
     }
 
-    // Create a fresh session explicitly (TUI may have resumed an old one)
+    // Create a fresh session (don't restart TUI - causes port binding issues on WSL)
     const createRes = await ocFetch(inst.ocPort, '/session', {
       method: 'POST',
       body: { title: inst.name },
@@ -221,22 +223,7 @@ async function startInstance(id) {
       throw new Error('Failed to create fresh session');
     }
     inst.sessionId = createRes.data.id;
-    console.log(`[SESSION:${inst.name}] Created new session: ${inst.sessionId}`);
-
-    // Restart tmux with --session so TUI opens directly to this fresh session
-    try {
-      const sid = tmux.sessionName(inst.id);
-      await tmux.killSession(sid);
-      await new Promise(r => setTimeout(r, 1500));
-      await tmux.createSessionWithEnv(inst.id,
-        `opencode --port ${inst.ocPort} --hostname 127.0.0.1 --session ${inst.sessionId}`,
-        inst.dir, env, { cols: 160, rows: 40 });
-      console.log(`[TMUX] mam-${inst.id} recreated with --session ${inst.sessionId}`);
-      inst.ocReady = false;
-      await ensureServeReady(inst);
-    } catch (e) {
-      console.warn(`[TMUX] Session restart failed: ${e.message}`);
-    }
+    console.log(`[SESSION:${inst.name}] Created session: ${inst.sessionId}`);
 
     inst.status = 'ready';
     inst.startedAt = new Date().toISOString();
@@ -289,9 +276,11 @@ async function runAuditForInstance(id) {
       method: 'POST',
       body: promptBody,
     });
+    console.log(`[AUDIT:${inst.name}] Prompt sent to session ${inst.sessionId}`);
 
     scheduleAuditTimeout(id);
   } catch (err) {
+    console.error(`[AUDIT:${inst.name}] Failed: ${err.message}`);
     inst.status = 'error';
     inst.error = err.message;
     broadcast('instance.update', getInstanceSummary(inst));
@@ -537,8 +526,10 @@ app.post('/api/instances/:id/send', async (req, res) => {
       method: 'POST',
       body: { parts: [{ type: 'text', text }] },
     });
+    console.log(`[SEND:${inst.name}] Text sent to session ${inst.sessionId}`);
     res.json({ ok: true });
   } catch (err) {
+    console.error(`[SEND:${inst.name}] Failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });
